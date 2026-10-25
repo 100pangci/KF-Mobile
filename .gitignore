@@ -1,0 +1,45 @@
+# Local session/cookie data and development secrets
+.secrets/
+local.properties
+*.cookies.txt
+cookie.txt
+docs/login-probe-result.json
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+.env.*
+
+# Build caches and IDE files
+.gradle/
+.kotlin/
+**/build/
+.idea/
+*.iml
+.vscode/
+.fleet/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Generated packages and reports
+artifacts/
+*.apk
+*.aab
+*.zip
+*.hprof
+*.log
+hs_err_pid*
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc

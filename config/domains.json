@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "defaultDomainId": "miaola",
+  "domains": [
+    { "id": "miaola", "name": "喵拉 · 主站", "origin": "https://kf.miaola.work" },
+    { "id": "miaola-0", "name": "喵拉 · 节点 0", "origin": "https://0.kf.miaola.work" },
+    { "id": "miaola-1", "name": "喵拉 · 节点 1", "origin": "https://1.kf.miaola.work" },
+    { "id": "miaola-2", "name": "喵拉 · 节点 2", "origin": "https://2.kf.miaola.work" }
+  ]
+}
