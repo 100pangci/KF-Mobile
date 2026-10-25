@@ -3,6 +3,7 @@
 package work.miaola.kf
 
 import androidx.compose.material3.Text
+import androidx.compose.material3.Surface
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import kotlinx.coroutines.*
@@ -11,9 +12,33 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
 import work.miaola.kf.ui.KfApp
+import work.miaola.kf.ui.KfActions
+import work.miaola.kf.ui.KfTheme
+import work.miaola.kf.ui.SearchScreen
+import work.miaola.kf.ui.searchCacheKey
 
 /** Headless rendering of shared Compose UI with clearly synthetic, offline data. */
 class UiRenderTest {
+    @Test fun searchScreenRendersResultsInline() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val c = AppController(MemoryStore(), DemoFactory(), scope, browser = { _, _ -> })
+        c.updateTheme(ThemeMode.LIGHT)
+        c.ensureSearch(searchCacheKey("绯月", "作者"), "绯月", "作者")
+        val scene = ImageComposeScene(width = 412, height = 915, density = Density(1f)) {
+            KfTheme(c.theme) { Surface { SearchScreen(c, KfActions(), "绯月", "作者") } }
+        }
+        try {
+            scene.render(0).close(); scene.render(250_000_000).close()
+            val image = scene.render(1_000_000_000)
+            try {
+                val bytes = image.encodeToData(EncodedImageFormat.PNG)?.bytes
+                assertNotNull(bytes); assertTrue(bytes.size > 5000)
+                val output = Path.of(System.getProperty("kf.projectRoot"), "shared", "build", "reports", "ui", "search-light.png")
+                Files.createDirectories(output.parent); Files.write(output, bytes)
+            } finally { image.close() }
+        } finally { scene.close(); c.close(); scope.cancel() }
+    }
+
     @Test fun phoneScreensRenderInLightAndDark() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val factory = DemoFactory()

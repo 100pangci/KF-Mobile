@@ -41,14 +41,18 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
     val native = page?.nativePage
     if (native == null) {
         Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-            Text("当前页面尚未提取到原生内容", style = MaterialTheme.typography.bodyMedium)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("暂时无法显示内容，请稍后重试", style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = { page?.let { c.ensurePage(it.url, force = true) } }) { Text("重试") }
+            }
         }
         return
     }
     native.growth?.let { growth ->
-        GrowthScreen(c, growth)
+        GrowthScreen(c, growth, native, actions, richContent)
         return
     }
+    if (NativeTaskScreen(c, page, actions, richContent, forumAvatar)) return
     val background = MaterialTheme.colorScheme.background
     val state = rememberLazyListState()
     val messageDetail = page.url.contains("message.php") && page.url.contains("action=read")
@@ -74,7 +78,7 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
             }
             if (native.unsupported.isNotEmpty() && !messageDetail) item { UnsupportedBlock(native.unsupported) }
             if (native.forms.isNotEmpty()) {
-                item { SectionLabel(if (native.forms.size > 1) "本页表单" else "填写", Icons.Default.EditNote) }
+                item { SectionLabel("页面操作", Icons.Default.EditNote) }
                 items(native.forms, key = { it.id }) { form -> NativeFormCard(c, form) }
             }
             if (page.next != null || page.previous != null) item { Pagination(page, actions.open) }
@@ -83,7 +87,7 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
 }
 
 @Composable
-private fun GrowthScreen(c: AppController, growth: NativeGrowth) {
+private fun GrowthScreen(c: AppController, growth: NativeGrowth, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val background = MaterialTheme.colorScheme.background
     val state = rememberLazyListState()
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f), background), endY = 720f))) {
@@ -118,7 +122,7 @@ private fun GrowthScreen(c: AppController, growth: NativeGrowth) {
             item {
                 Button(
                     onClick = c::claimDailyReward,
-                    enabled = !c.dailyBusy && !c.dailySigned,
+                    enabled = !c.dailyBusy && !c.dailySigned && !growth.claimed,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = RoundedCornerShape(16.dp),
                 ) {
@@ -126,7 +130,7 @@ private fun GrowthScreen(c: AppController, growth: NativeGrowth) {
                     Text(
                         when {
                             c.dailyBusy -> " 签到中…"
-                            c.dailySigned -> " 今日已签到"
+                            c.dailySigned || growth.claimed -> " 今日已签到"
                             else -> " 签到领 KFB"
                         },
                         style = MaterialTheme.typography.titleSmall,
@@ -134,6 +138,16 @@ private fun GrowthScreen(c: AppController, growth: NativeGrowth) {
                     )
                 }
             }
+            if (growth.colors.isNotEmpty()) item {
+                Text("成长颜色", style = MaterialTheme.typography.titleSmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    growth.colors.forEach { color -> TextButton(onClick = { actions.open(color.url) }, enabled = !c.siteBusy) {
+                        Box(Modifier.size(20.dp).clip(CircleShape).background(parseColor(color.color) ?: MaterialTheme.colorScheme.primary))
+                        Text(color.label.ifBlank { "选择颜色" }, Modifier.padding(start = 6.dp))
+                    } }
+                }
+            }
+            item { TaskPageExtras(c, native, actions, rich) }
         }
     }
 }
@@ -172,8 +186,8 @@ private fun PageMenu(links: List<SiteDestination>, onRead: (String) -> Unit, onA
                 DropdownMenuItem(
                     text = {
                         Column {
-                            Text(link.title.ifBlank { "站点操作" }, style = MaterialTheme.typography.bodyMedium)
-                            Text(effectHint(link.effect), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(link.title.ifBlank { "更多功能" }, style = MaterialTheme.typography.bodyMedium)
+                            if (link.effect != SiteEffect.READ) Text(effectHint(link), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     },
                     leadingIcon = { Icon(effectIcon(link.effect), null, Modifier.size(20.dp)) },
@@ -298,7 +312,7 @@ private fun DefinitionTable(table: NativeTable, onLink: (String) -> Unit) {
             TableText(row.first(), onLink, Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), MaterialTheme.typography.bodyMedium)
         } else {
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp), verticalAlignment = Alignment.Top) {
-                Text(row.first().text.ifBlank { "—" }, Modifier.width(100.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TableText(row.first(), onLink, Modifier.width(100.dp), MaterialTheme.typography.bodySmall)
                 Box(Modifier.weight(1f)) {
                     if (row.getOrNull(1)?.text.isNullOrBlank() && row.getOrNull(1)?.link == null) {
                         Text("在下方填写", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
@@ -324,9 +338,7 @@ private fun NavTable(table: NativeTable, onLink: (String) -> Unit) {
                             .padding(horizontal = 6.dp, vertical = 12.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(cell.text, style = MaterialTheme.typography.bodySmall, fontWeight = if (cell.bold) FontWeight.Bold else FontWeight.Medium,
-                            color = if (cell.link != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        TableText(cell, onLink, Modifier.fillMaxWidth(), MaterialTheme.typography.bodySmall, align = NativeAlign.CENTER)
                     }
                 }
                 repeat(4 - chunk.size) { Spacer(Modifier.weight(1f)) }
@@ -412,16 +424,19 @@ private fun GridRow(row: List<NativeCell>, columns: Int, header: Boolean, scroll
 private fun TableText(cell: NativeCell, onLink: (String) -> Unit, modifier: Modifier, style: androidx.compose.ui.text.TextStyle,
                       bold: Boolean = cell.bold, align: NativeAlign = cell.align) {
     val color = parseColor(cell.color)
+    Column(modifier) {
     Text(
         text = cell.text,
-        modifier = modifier.then(if (cell.link != null) Modifier.clickable { onLink(cell.link) } else Modifier),
+        modifier = Modifier.then(if (cell.link != null) Modifier.clickable { onLink(cell.link) } else Modifier),
         style = style,
         fontWeight = if (bold || cell.link != null) FontWeight.Medium else FontWeight.Normal,
         color = color ?: if (cell.link != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-        maxLines = 4,
-        overflow = TextOverflow.Ellipsis,
         textAlign = when (align) { NativeAlign.CENTER -> TextAlign.Center; NativeAlign.END -> TextAlign.End; NativeAlign.START -> TextAlign.Start },
     )
+    cell.actions.filterNot { it.url == cell.link }.forEach { action ->
+        TextButton(onClick = { onLink(action.url) }) { Text(action.title) }
+    }
+    }
 }
 
 @Composable
@@ -436,18 +451,23 @@ private fun LinkFlow(links: List<SiteDestination>, onLink: (String) -> Unit, mod
 }
 
 @Composable
-private fun UnsupportedBlock(items: List<String>) {
+internal fun UnsupportedBlock(items: List<String>) {
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.Block, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("尚未适配", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                Text("暂不可用", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
             }
             items.forEach { item ->
                 Row(verticalAlignment = Alignment.Top) {
                     Box(Modifier.padding(top = 6.dp).size(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outline))
-                    Text(item, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val label = when {
+                        item.contains("咕咕镇战斗") -> "暂不支持咕咕镇的战斗与背包"
+                        item.contains("头像上传") -> "暂不支持上传头像"
+                        else -> item
+                    }
+                    Text(label, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -455,7 +475,7 @@ private fun UnsupportedBlock(items: List<String>) {
 }
 
 @Composable
-private fun NativeFormCard(c: AppController, form: SiteForm) {
+internal fun NativeFormCard(c: AppController, form: SiteForm) {
     var expanded by remember(form) { mutableStateOf(form.fields.size <= 12) }
     val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -481,7 +501,7 @@ private fun NativeFormCard(c: AppController, form: SiteForm) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                     }
                     form.fields.forEach { field -> NativeField(c, form, field, values[field.id].orEmpty()) { values[field.id] = it } }
-                    Text(form.warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (form.id != "rpc:recommend") Text(if (form.warning == "提交会改变站点数据，请核对后确认。") "请核对填写内容后提交。" else form.warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     form.submits.forEachIndexed { index, submit ->
                         val enabled = !c.siteBusy && !c.busy
                         if (index == 0) Button(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = enabled, modifier = Modifier.fillMaxWidth().height(46.dp)) {
@@ -497,7 +517,7 @@ private fun NativeFormCard(c: AppController, form: SiteForm) {
 }
 
 @Composable
-private fun NativeField(c: AppController, form: SiteForm, field: SiteField, values: List<String>, update: (List<String>) -> Unit) {
+internal fun NativeField(c: AppController, form: SiteForm, field: SiteField, values: List<String>, update: (List<String>) -> Unit) {
     when (field.kind) {
         SiteFieldKind.TEXT, SiteFieldKind.PASSWORD, SiteFieldKind.MULTILINE, SiteFieldKind.NUMBER -> {
             var visible by remember { mutableStateOf(false) }
@@ -509,8 +529,8 @@ private fun NativeField(c: AppController, form: SiteForm, field: SiteField, valu
                 trailingIcon = if (field.kind == SiteFieldKind.PASSWORD) { { IconButton(onClick = { visible = !visible }) { Icon(Icons.Default.Visibility, "显示或隐藏") } } } else null,
                 enabled = !c.siteBusy && field.editable, shape = RoundedCornerShape(10.dp))
         }
-        SiteFieldKind.CHECKBOX -> Row(Modifier.fillMaxWidth().clickable { update(if (values.isEmpty()) field.options.map { it.value } else emptyList()) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(values.isNotEmpty(), { checked -> update(if (checked) field.options.map { it.value } else emptyList()) })
+        SiteFieldKind.CHECKBOX -> Row(Modifier.fillMaxWidth().clickable(enabled = !c.siteBusy && field.editable) { update(if (values.isEmpty()) field.options.map { it.value } else emptyList()) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(values.isNotEmpty(), { checked -> update(if (checked) field.options.map { it.value } else emptyList()) }, enabled = !c.siteBusy && field.editable)
             Text(field.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         SiteFieldKind.SELECT -> {
@@ -531,9 +551,9 @@ private fun NativeField(c: AppController, form: SiteForm, field: SiteField, valu
         }
         SiteFieldKind.RADIO -> {
             Text(field.label, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                field.options.forEach { option -> Row(Modifier.weight(1f).clickable { update(listOf(option.value)) }, verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(values.firstOrNull() == option.value, { update(listOf(option.value)) }); Text(option.label, style = MaterialTheme.typography.bodyMedium)
+            Column(Modifier.fillMaxWidth()) {
+                field.options.forEach { option -> Row(Modifier.fillMaxWidth().clickable(enabled = !c.siteBusy && field.editable) { update(listOf(option.value)) }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(values.firstOrNull() == option.value, { update(listOf(option.value)) }, enabled = !c.siteBusy && field.editable); Text(option.label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                 } }
             }
         }
@@ -544,12 +564,12 @@ private fun NativeField(c: AppController, form: SiteForm, field: SiteField, valu
     }
 }
 
-private fun effectHint(effect: SiteEffect): String = when (effect) {
+private fun effectHint(link: SiteDestination): String = when (link.effect) {
     SiteEffect.READ -> "打开页面"
-    SiteEffect.CHANGE -> "会修改站点数据，需确认"
+    SiteEffect.CHANGE -> if (SiteActionRisk.needsConfirmation(link)) "需要确认" else "点按执行"
     SiteEffect.DOWNLOAD -> "下载文件"
     SiteEffect.EXTERNAL -> "外部应用打开"
-    SiteEffect.UNSUPPORTED -> "尚未适配"
+    SiteEffect.UNSUPPORTED -> "暂不可用"
 }
 
 private fun effectIcon(effect: SiteEffect): ImageVector = when (effect) {

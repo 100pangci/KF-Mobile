@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
                 }
                 controller.reportPlatformResult("已保存到所选位置")
             } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (e: AttachmentPageRequired) { controller.presentNativePage(e.page); controller.reportPlatformResult("附件需要权限或购买，请核对原生详情页面") }
+            catch (e: AttachmentPageRequired) { controller.presentNativePage(e.page); controller.reportPlatformResult("附件需要权限或购买，请核对详情") }
             catch (e: Exception) { controller.reportPlatformResult(e.message ?: "保存失败", true) }
         }
     }

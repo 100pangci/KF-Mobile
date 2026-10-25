@@ -17,7 +17,7 @@ object KfRoutes {
     const val PROFILE = "profile?url={url}"
     const val NATIVE = "native?url={url}"
     const val EDITOR = "editor?url={url}"
-    const val SEARCH = "search?q={q}&author={author}"
+    const val SEARCH = work.miaola.kf.ui.KfSearchRoute.pattern
 
     fun listing(url: String) = "listing?url=${encode(url)}"
     fun reader(url: String) = "reader?url=${encode(url)}"
@@ -26,9 +26,10 @@ object KfRoutes {
     fun profile(url: String) = "profile?url=${encode(url)}"
     fun native(url: String) = "native?url=${encode(url)}"
     fun editor(url: String) = "editor?url=${encode(url)}"
-    fun search(keyword: String, author: String) = "search?q=${encode(keyword)}&author=${encode(author)}"
+    fun search(keyword: String, author: String) = work.miaola.kf.ui.KfSearchRoute.create(keyword, author)
+    fun searchResult(url: String) = work.miaola.kf.ui.KfSearchRoute.create(resultUrl = url)
 
-    fun searchKey(keyword: String, author: String) = "search:${keyword.trim()}|${author.trim()}"
+    fun searchKey(keyword: String, author: String) = work.miaola.kf.ui.searchCacheKey(keyword, author)
 
     private fun encode(value: String) = Uri.encode(value)
 }
@@ -56,7 +57,7 @@ fun NavBackStackEntry.kfLocation(): KfLocation {
         KfRoutes.PROFILE -> KfLocation(KfDestinationKind.PROFILE, arg("url"))
         KfRoutes.NATIVE -> KfLocation(KfDestinationKind.NATIVE, arg("url"))
         KfRoutes.EDITOR -> KfLocation(KfDestinationKind.EDITOR, arg("url"))
-        KfRoutes.SEARCH -> KfLocation(KfDestinationKind.SEARCH, null, arg("q").orEmpty(), arg("author").orEmpty())
+        KfRoutes.SEARCH -> KfLocation(KfDestinationKind.SEARCH, arg("url")?.takeIf { it.isNotBlank() }, arg("q").orEmpty(), arg("author").orEmpty())
         else -> KfLocation(KfDestinationKind.FEED)
     }
 }

@@ -47,15 +47,33 @@ fun KfRoot(
     forumAvatar: ForumImage,
     richContent: RichContent,
 ) {
+    key(c.origin) { KfRootForServer(c, forumImage, forumAvatar, richContent) }
+}
+
+@Composable
+private fun KfRootForServer(
+    c: AppController,
+    forumImage: ForumImage,
+    forumAvatar: ForumImage,
+    richContent: RichContent,
+) {
     KfTheme(c.theme) {
         val nav = rememberNavController()
         val backStackEntry by nav.currentBackStackEntryAsState()
         val location = backStackEntry?.kfLocation() ?: KfLocation(KfDestinationKind.FEED)
         val direction = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1 else 1
         val snackbar = remember { SnackbarHostState() }
-        var search by remember { mutableStateOf(false) }
         var logout by remember { mutableStateOf(false) }
-        var menu by remember { mutableStateOf(false) }
+        // A pristine editor lets NavHost own predictive back. Clear its form
+        // only after the current entry actually changes, never on a cancelled
+        // predictive gesture or when an underlying destination is composed.
+        DisposableEffect(backStackEntry) {
+            val leavingEditor = location.kind == KfDestinationKind.EDITOR
+            onDispose {
+                if (leavingEditor && nav.currentBackStackEntry?.kfLocation()?.kind !in setOf(KfDestinationKind.EDITOR, KfDestinationKind.LOGIN) &&
+                    !c.editorDirty && !c.busy) c.dismissEditor()
+            }
+        }
 
         fun go(route: String) {
             nav.navigate(route) { launchSingleTop = true }
@@ -77,22 +95,35 @@ fun KfRoot(
         }
 
         fun open(url: String) {
-            if (url.isBlank()) return
+            if (url.isBlank() || c.siteBusy || c.purchaseBusy || c.editor != null && c.busy) return
+            val target = c.resolve(url)
             // Never wrap a read-only message box in a high-risk action dialog.
-            val sameSite = url.startsWith(c.origin) || (!url.contains("://") && !url.startsWith("//"))
-            if (sameSite && KfDestinations.isReadOnlyMessage(url)) {
+            val sameSite = target.effect in setOf(SiteEffect.READ, SiteEffect.CHANGE, SiteEffect.DOWNLOAD)
+            if (sameSite && KfDestinations.isSearchNavigation(url)) {
+                // Keep legacy GBK query bytes intact. Nav arguments are UTF-8,
+                // but an existing forum search URL is already encoded by the site.
+                if (target.url.substringAfter('?', "").substringBefore('#').isNotBlank()) go(KfRoutes.searchResult(target.url))
+                else go(KfRoutes.search("", ""))
+                return
+            }
+            if (target.effect == SiteEffect.READ && KfDestinations.isReadOnlyMessage(target.url)) {
                 when (KfDestinations.fromUrl(url)) {
                     KfDestinationKind.EDITOR -> go(KfRoutes.editor(url))
                     KfDestinationKind.MESSAGE -> go(KfRoutes.message(url))
-                    else -> if (nav.currentDestination?.route in setOf(KfRoutes.MESSAGES, KfRoutes.MESSAGE)) {
-                        replace(KfRoutes.messages(url))
-                    } else {
-                        goRoot(KfRoutes.messages(url), restore = false)
+                    else -> {
+                        val mailbox = nav.previousBackStackEntry?.takeIf { it.destination.route == KfRoutes.MESSAGES }
+                        when {
+                            nav.currentDestination?.route == KfRoutes.MESSAGE && mailbox != null -> nav.navigate(KfRoutes.messages(url)) {
+                                popUpTo(mailbox.destination.id) { inclusive = true }
+                                launchSingleTop = true
+                            }
+                            nav.currentDestination?.route == KfRoutes.MESSAGES -> replace(KfRoutes.messages(url))
+                            else -> goRoot(KfRoutes.messages(url), restore = false)
+                        }
                     }
                 }
                 return
             }
-            val target = c.resolve(url)
             if (target.effect != SiteEffect.READ) {
                 c.openSiteDestination(target)
                 return
@@ -104,7 +135,7 @@ fun KfRoot(
                 KfDestinationKind.LISTING -> go(KfRoutes.listing(url))
                 KfDestinationKind.READER -> go(KfRoutes.reader(url))
                 KfDestinationKind.EDITOR -> go(KfRoutes.editor(url))
-                KfDestinationKind.SEARCH -> go(KfRoutes.listing(url))
+                KfDestinationKind.SEARCH -> go(KfRoutes.search("", ""))
                 KfDestinationKind.MESSAGES -> goRoot(KfRoutes.messages(url), restore = false)
                 KfDestinationKind.MESSAGE -> go(KfRoutes.message(url))
                 KfDestinationKind.PROFILE -> go(KfRoutes.profile(url))
@@ -125,14 +156,21 @@ fun KfRoot(
                 open = ::open,
                 openSettings = { go(KfRoutes.SETTINGS) },
                 openLogin = { go(KfRoutes.LOGIN) },
-                openSearch = { search = true },
+                openSearch = { go(KfRoutes.search("", "")) },
                 openNative = ::openNative,
                 selectTab = { tab ->
-                    when (tab) {
+                    if (!c.siteBusy && !c.purchaseBusy && !(c.editor != null && c.busy)) {
+                    if (nav.currentBackStackEntry?.kfLocation()?.kind == when (tab) {
+                        HomeTab.FEED -> KfDestinationKind.FEED
+                        HomeTab.BOARDS -> KfDestinationKind.BOARDS
+                        HomeTab.MESSAGES -> KfDestinationKind.MESSAGES
+                        HomeTab.ACCOUNT -> KfDestinationKind.ACCOUNT
+                    }) c.reselectTab(tab) else when (tab) {
                         HomeTab.FEED -> goRoot(KfRoutes.FEED)
                         HomeTab.BOARDS -> goRoot(KfRoutes.BOARDS)
                         HomeTab.MESSAGES -> goRoot(KfRoutes.messages("message.php"))
                         HomeTab.ACCOUNT -> goRoot(KfRoutes.ACCOUNT)
+                    }
                     }
                 },
                 back = {
@@ -144,7 +182,7 @@ fun KfRoot(
         val page: PageData? = when (location.kind) {
             KfDestinationKind.FEED -> c.home ?: c.pageFor("index.php")
             KfDestinationKind.BOARDS, KfDestinationKind.ACCOUNT -> c.home
-            KfDestinationKind.SEARCH -> c.pageFor(KfRoutes.searchKey(location.query, location.author))
+            KfDestinationKind.SEARCH -> c.pageFor(location.url ?: KfRoutes.searchKey(location.query, location.author))
             KfDestinationKind.SETTINGS, KfDestinationKind.LOGIN, KfDestinationKind.EDITOR -> c.page
             else -> location.url?.let(c::pageFor)
         }
@@ -159,8 +197,8 @@ fun KfRoot(
             KfDestinationKind.MESSAGES -> page?.title ?: "消息"
             KfDestinationKind.SEARCH -> page?.title ?: "搜索"
             KfDestinationKind.MESSAGE, KfDestinationKind.PROFILE, KfDestinationKind.NATIVE ->
-                page?.nativePage?.title ?: page?.title ?: "站点功能"
-            KfDestinationKind.LISTING -> page?.title ?: "话题"
+                page?.nativePage?.title ?: page?.title ?: "更多功能"
+            KfDestinationKind.LISTING -> if (page?.nativePage?.favorites != null) "收藏" else page?.title ?: "话题"
             KfDestinationKind.READER -> page?.title ?: "阅读"
         }
         val canGoBack = location.kind != KfDestinationKind.FEED &&
@@ -168,15 +206,15 @@ fun KfRoot(
             location.kind != KfDestinationKind.MESSAGES &&
             location.kind != KfDestinationKind.ACCOUNT
         val showBottomBar = location.kind.isTopLevel
-        val showSearch = location.kind !in listOf(KfDestinationKind.SETTINGS, KfDestinationKind.LOGIN, KfDestinationKind.EDITOR)
 
         fun back() {
             when (location.kind) {
                 KfDestinationKind.EDITOR -> {
+                    if (c.busy && !c.loadingEditor) return
                     if (c.loadingEditor) {
                         c.requestBack()
                         nav.popBackStack()
-                    } else if (c.editor != null && (c.draftTitle.isNotBlank() || c.draftContent.isNotBlank())) {
+                    } else if (c.editorDirty) {
                         c.confirmDiscard = true
                     } else if (c.editor != null) {
                         c.dismissEditor()
@@ -189,6 +227,10 @@ fun KfRoot(
         }
 
         fun refresh() {
+            if (page != null && location.kind in setOf(KfDestinationKind.FEED, KfDestinationKind.BOARDS, KfDestinationKind.LISTING, KfDestinationKind.MESSAGES, KfDestinationKind.READER)) {
+                c.refreshTimeline(page)
+                return
+            }
             when (location.kind) {
                 KfDestinationKind.FEED, KfDestinationKind.BOARDS, KfDestinationKind.ACCOUNT -> c.load("index.php", false)
                 else -> {
@@ -198,23 +240,14 @@ fun KfRoot(
             }
         }
 
-        fun openPageNative() {
-            val url = when (location.kind) {
-                KfDestinationKind.FEED, KfDestinationKind.BOARDS, KfDestinationKind.ACCOUNT -> c.home?.url ?: "index.php"
-                else -> location.url ?: page?.url ?: "index.php"
-            }
-            openNative(url)
-        }
-
         // Only the current destination owns the controller's action page.
         // Underlying destinations may be composed during a predictive gesture,
         // but must not steal bookmark/purchase context before the pop commits.
-        LaunchedEffect(location.kind, location.url, page?.url) {
+        LaunchedEffect(location.kind, location.url, page, c.page) {
             page?.let(c::activatePage)
         }
 
         LaunchedEffect(location.kind, location.url) {
-            menu = false
             when (location.kind) {
                 KfDestinationKind.FEED -> c.setActiveTab(HomeTab.FEED)
                 KfDestinationKind.BOARDS -> c.setActiveTab(HomeTab.BOARDS)
@@ -224,12 +257,7 @@ fun KfRoot(
             }
         }
 
-        LaunchedEffect(c.toast) {
-            c.toast?.let {
-                snackbar.showSnackbar(it)
-                c.clearMessage()
-            }
-        }
+        KfOperationFeedback(c, snackbar, page != null || c.editor != null)
 
         // Login expiry is raised by the controller; present it as a destination.
         // login.php opened as a native form is not the app login prompt.
@@ -241,7 +269,8 @@ fun KfRoot(
         LaunchedEffect(c.pendingNativePage) {
             c.pendingNativePage?.let { url ->
                 c.consumeNativePage()
-                nav.navigate(KfRoutes.native(url)) { launchSingleTop = true }
+                if (c.resolve(url).effect == SiteEffect.READ && KfDestinations.isReadOnlyMessage(c.resolve(url).url)) open(url)
+                else nav.navigate(KfRoutes.native(url)) { launchSingleTop = true }
             }
         }
 
@@ -249,26 +278,19 @@ fun KfRoot(
             Scaffold(
                 containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
+                    if (location.kind != KfDestinationKind.SEARCH) {
                     KfTopBar(
                         title = title,
                         root = location.kind.isTopLevel,
                         showBack = canGoBack,
-                        showSearch = showSearch,
+                        kind = location.kind,
+                        c = c,
                         page = page,
-                        favorite = page?.favorite,
+                        actions = actions,
                         onBack = ::back,
-                        onSearch = { search = true },
-                        onSettings = { go(KfRoutes.SETTINGS) },
-                        menuOpen = menu,
-                        onMenuOpen = { menu = true },
-                        onMenuDismiss = { menu = false },
-                        onRefresh = { menu = false; refresh() },
-                        onNative = { menu = false; openPageNative() },
-                        onFavorite = {
-                            menu = false
-                            c.favoriteThread(page?.favorite)
-                        },
+                        onRefresh = ::refresh,
                     )
+                    }
                 },
                 bottomBar = {
                     AnimatedVisibility(
@@ -281,7 +303,7 @@ fun KfRoot(
                 },
                 floatingActionButton = {
                     val composeUrl = page?.composeUrl
-                    if (composeUrl != null) ExtendedFloatingActionButton(
+                    if (composeUrl != null && location.kind in setOf(KfDestinationKind.LISTING, KfDestinationKind.READER, KfDestinationKind.MESSAGES)) ExtendedFloatingActionButton(
                         onClick = { open(composeUrl) },
                         icon = { Icon(Icons.Default.Edit, null) },
                         text = {
@@ -353,7 +375,7 @@ fun KfRoot(
                             val url = entry.arguments?.getString("url").orEmpty()
                             val listPage = c.pageFor(url)
                             LaunchedEffect(url) { c.ensurePage(url) }
-                            if (listPage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) }) else ListingScreen(c, actions, listPage, isMessages = false)
+                            if (listPage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) }) else ListingScreen(c, actions, listPage, isMessages = false, rich = richContent)
                         }
                         composable(
                             KfRoutes.READER,
@@ -373,7 +395,7 @@ fun KfRoot(
                             val messagePage = c.pageFor(url)
                             LaunchedEffect(url) { c.ensurePage(url) }
                             if (messagePage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) })
-                            else ListingScreen(c, actions, messagePage, isMessages = true)
+                            else ListingScreen(c, actions, messagePage, isMessages = true, rich = richContent)
                         }
                         composable(
                             KfRoutes.MESSAGE,
@@ -407,7 +429,7 @@ fun KfRoot(
                                 if (c.editor != null) seenEditor = true
                                 else if (seenEditor) nav.popBackStack()
                             }
-                            BackHandler { back() }
+                            BackHandler(enabled = c.editorDirty || c.loadingEditor || c.busy) { back() }
                             if (c.editor?.sourceUrl == sourceUrl) EditorScreen(c, forumImage)
                             else KfLoading(c, message = "正在准备编辑器…", onRetry = { c.openEditor(sourceUrl) })
                         }
@@ -416,34 +438,18 @@ fun KfRoot(
                             arguments = listOf(
                                 navArgument("q") { type = NavType.StringType; defaultValue = "" },
                                 navArgument("author") { type = NavType.StringType; defaultValue = "" },
+                                navArgument("url") { type = NavType.StringType; defaultValue = "" },
                             ),
                         ) { entry ->
                             val keyword = entry.arguments?.getString("q").orEmpty()
                             val author = entry.arguments?.getString("author").orEmpty()
-                            val key = KfRoutes.searchKey(keyword, author)
-                            val result = c.pageFor(key)
-                            var attempted by remember(key) { mutableStateOf(false) }
-                            LaunchedEffect(key, c.busy) {
-                                if (result == null && !c.busy && !attempted) {
-                                    attempted = true
-                                    c.ensureSearch(key, keyword, author)
-                                }
-                            }
-                            if (result == null) KfLoading(c, message = "正在搜索…", onRetry = { c.ensureSearch(key, keyword, author) })
-                            else ListingScreen(c, actions, result, isMessages = false)
+                            SearchScreen(c, actions, keyword, author, entry.arguments?.getString("url").orEmpty())
                         }
                     }
                 }
             }
         }
 
-        if (search) SearchDialog(
-            onDismiss = { search = false },
-            onSearch = { keyword, author ->
-                search = false
-                nav.navigate(KfRoutes.search(keyword, author)) { launchSingleTop = true }
-            },
-        )
         KfGlobalDialogs(c, logout = logout, onLogoutChange = { logout = it })
     }
 }
@@ -469,13 +475,7 @@ private fun KfNativeDestination(
 
 @Composable
 private fun KfLoading(c: AppController, message: String = "正在连接绯月…", onRetry: () -> Unit) {
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            if (c.busy) CircularProgressIndicator() else Icon(Icons.Default.Forum, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(if (c.busy) message else c.error ?: "这里还没有可显示的内容", style = MaterialTheme.typography.bodyMedium)
-            if (!c.busy) TextButton(onClick = onRetry) { Text("重试") }
-        }
-    }
+    KfPageLoadState(c.busy, c.error, onRetry, message)
 }
 
 @Composable
@@ -483,18 +483,12 @@ private fun KfTopBar(
     title: String,
     root: Boolean,
     showBack: Boolean,
-    showSearch: Boolean,
+    kind: KfDestinationKind,
+    c: AppController,
     page: PageData?,
-    favorite: SiteDestination?,
+    actions: KfActions,
     onBack: () -> Unit,
-    onSearch: () -> Unit,
-    onSettings: () -> Unit,
-    menuOpen: Boolean,
-    onMenuOpen: () -> Unit,
-    onMenuDismiss: () -> Unit,
     onRefresh: () -> Unit,
-    onNative: () -> Unit,
-    onFavorite: () -> Unit,
 ) {
     TopAppBar(
         title = {
@@ -504,26 +498,12 @@ private fun KfTopBar(
             }
         },
         navigationIcon = {
-            if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            if (kind == KfDestinationKind.EDITOR) TextButton(onClick = onBack) { Text("取消") }
+            else if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
             else Icon(Icons.Default.NightsStay, null, Modifier.padding(start = 20.dp, end = 8.dp), tint = MaterialTheme.colorScheme.primary)
         },
         actions = {
-            if (showSearch) {
-                IconButton(onClick = onSearch) { Icon(Icons.Default.Search, "搜索") }
-                IconButton(onClick = onSettings) { Icon(Icons.Default.Tune, "设置") }
-                Box {
-                    IconButton(onClick = onMenuOpen) { Icon(Icons.Default.MoreVert, "更多") }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = onMenuDismiss) {
-                        DropdownMenuItem(text = { Text("刷新") }, onClick = onRefresh, leadingIcon = { Icon(Icons.Default.Refresh, null) })
-                        DropdownMenuItem(text = { Text("本页原生功能") }, onClick = onNative, leadingIcon = { Icon(Icons.Default.Widgets, null) })
-                        if (favorite != null) DropdownMenuItem(
-                            text = { Text("收藏本帖") },
-                            onClick = onFavorite,
-                            leadingIcon = { Icon(Icons.Default.BookmarkAdd, null) },
-                        )
-                    }
-                }
-            }
+            KfPageActions(c, kind, page, actions, onRefresh)
         },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
     )
@@ -541,7 +521,7 @@ private fun KfBottomBar(kind: KfDestinationKind, actions: KfActions) {
         tabs.forEach { (tab, icon, tabKind) ->
             NavigationBarItem(
                 selected = kind == tabKind,
-                onClick = { if (kind != tabKind) actions.selectTab(tab) },
+                onClick = { actions.selectTab(tab) },
                 icon = { Icon(icon, tab.title) },
                 label = { Text(tab.title) },
             )

@@ -1,5 +1,8 @@
 import unittest
-from probe_login import Page, authenticated, encode_form, same_origin, safe_url
+if __package__:
+    from .probe_login import Page, authenticated, encode_form, same_origin, safe_url
+else:
+    from probe_login import Page, authenticated, encode_form, same_origin, safe_url
 
 
 class LoginProbeTests(unittest.TestCase):

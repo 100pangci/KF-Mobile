@@ -30,7 +30,11 @@ class LiveSiteTest {
         val faces = root.resolve(".secrets/face.js")
         assumeTrue("Optional private resource capture", Files.exists(resource) && Files.exists(faces))
         val parser = ForumHtmlParser("https://kf.miaola.work")
-        val page = parser.parse(Files.readString(resource), "https://kf.miaola.work/read.php?tid=1086397")
+        val captured = Files.readString(resource)
+        val doc = parser.document(captured, "https://kf.miaola.work/")
+        val action = doc.select("[onclick],a[href]").map { it.attr("onclick") + it.attr("href") }.first { it.contains("action=buytopic") }
+        val tid = Regex("[?&]tid=([0-9]+)").find(action)?.groupValues?.get(1) ?: error("Captured purchase has no thread binding")
+        val page = parser.parse(captured, "https://kf.miaola.work/read.php?tid=$tid")
         val offer = page.posts.flatMap { it.purchases }.single()
         assertEquals("1", offer.price)
         assertEquals("KFB", offer.currency)
@@ -91,23 +95,17 @@ class LiveSiteTest {
     }
 
     @Test fun readOnlyLiveSession() = runBlocking {
-        assumeTrue("Set KF_LIVE_TEST=true to enable real read-only requests", System.getenv("KF_LIVE_TEST") == "true")
+        assumeTrue("Set KF_LIVE_TEST=true locally to enable real read-only requests", System.getenv("KF_LIVE_TEST") == "true" && System.getenv("CI").isNullOrBlank())
         val origin = "https://kf.miaola.work"
         val base = "$origin/".toHttpUrl()
         val service = HttpForumService(origin, MemoryStore())
-        val file = root.resolve(".secrets/kf.miaola.work.cookies.txt")
+        val file = LocalAuditCookies.file(root, base.host)
         assumeTrue("A locally authorized session is required", Files.exists(file))
-        val cookies = Files.readAllLines(file).mapNotNull { line ->
-            if (line.startsWith('#') && !line.startsWith("#HttpOnly_")) return@mapNotNull null
-            val parts = line.removePrefix("#HttpOnly_").split('\t')
-            if (parts.size != 7) return@mapNotNull null
-            if (parts[4].toLongOrNull()?.let { it != 0L && it * 1000 <= System.currentTimeMillis() } == true) return@mapNotNull null
-            Cookie.Builder().name(parts[5]).value(parts[6]).hostOnlyDomain(base.host).path(parts[2]).secure().build()
-        }
+        val cookies = LocalAuditCookies.load(Files.readString(file), origin)
         service.cookieJar.saveFromResponse(base, cookies)
         try {
             val home = service.fetch("index.php")
-            assertTrue(home.authenticated, "Authorized session is no longer valid")
+            assertTrue(home.authenticated, "Local authenticated cookie is expired or invalid.")
             assertTrue(home.boards.isNotEmpty())
             repeat(30) {
                 val bridge = BrowserSessionSync(service.cookieJar)

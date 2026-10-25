@@ -9,6 +9,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 
@@ -47,12 +48,14 @@ class AppController(
     var sessionNotice by mutableStateOf<String?>(null); private set
     var showEmoticonPicker by mutableStateOf(false)
     var showSiteTools by mutableStateOf(false)
+    var showTopicFilters by mutableStateOf(false)
     var dailyBusy by mutableStateOf(false); private set
     var dailySigned by mutableStateOf(store.get("daily_signed@$origin") == localDayKey()); private set
     var pendingNativePage by mutableStateOf<String?>(null); private set
     var pendingSiteDestination by mutableStateOf<SiteDestination?>(null); private set
     var pendingSiteSubmission by mutableStateOf<SiteSubmission?>(null); private set
     var siteBusy by mutableStateOf(false); private set
+    var managementRevision by mutableStateOf(0); private set
     var filePickerRequest by mutableStateOf<FilePickerRequest?>(null); private set
     var downloadRequest by mutableStateOf<NativeDownloadRequest?>(null); private set
     var editorFiles by mutableStateOf<List<LocalUpload>>(emptyList()); private set
@@ -66,6 +69,8 @@ class AppController(
     var siteFavorites by mutableStateOf<PageData?>(null); private set
     var favoritesBusy by mutableStateOf(false); private set
     var favoritesError by mutableStateOf<String?>(null); private set
+    var lastSearchKeyword by mutableStateOf(""); private set
+    var lastSearchAuthor by mutableStateOf(""); private set
     private var service = factory.create(origin)
     private var requestJob: Job? = null
     private var requestVersion = 0
@@ -81,22 +86,142 @@ class AppController(
     private val profileAvatarLimit = Semaphore(2)
     private var loginReturnUrl: String? = null
     private var nextUploadSlot = 1
+    private var messageListUrl: String? = null
     private val backStack = mutableStateListOf<Pair<PageData?, HomeTab>>()
     // Destinations keep their own page snapshot so predictive back can finish
     // over the correct page without re-fetching the thread.
     private val pageCache = mutableStateMapOf<String, PageData>()
+    private val timelines = mutableMapOf<String, PageTimeline>()
+    private val timelineJobs = mutableMapOf<String, Job>()
+    private val tabReselections = mutableStateMapOf<HomeTab, Int>()
+    fun reselectTab(tab: HomeTab) { tabReselections[tab] = reselectCount(tab) + 1 }
+    fun reselectCount(tab: HomeTab) = tabReselections[tab] ?: 0
+
+    fun timelineFor(first: PageData): PageTimeline {
+        timelines[first.url]?.let { return it }
+        val state = PageTimeline(first)
+        timelines[first.url] = state
+        // Bound destination retention, not the number of pages in the active
+        // reader. Appending 40 pages must not evict that reader's first page.
+        while (timelines.size > 32) {
+            val oldest = timelines.keys.firstOrNull { it != first.url && it != page?.url && it != home?.url && it != siteFavorites?.url } ?: break
+            timelineJobs.remove(oldest)?.cancel()
+            timelines.remove(oldest)
+        }
+        return state
+    }
+
+    private fun safeTimelineUrl(url: String): Boolean {
+        val destination = resolve(url)
+        return destination.effect == SiteEffect.READ ||
+            (destination.effect == SiteEffect.CHANGE && destination.url.startsWith("$origin/search.php?") &&
+                work.miaola.kf.ui.KfDestinations.isSearchNavigation(destination.url))
+    }
+
+    fun loadNext(first: PageData, retry: Boolean = false) {
+        if (purchaseBusy || siteBusy || pendingPurchase != null) return
+        val state = timelineFor(first)
+        val next = state.next ?: return
+        if (!state.canLoad(next) || (state.failure != null && !retry)) return
+        // Search result URLs are GETs but intentionally not classified as general
+        // read navigation. Only a page-number change on the issued result is safe.
+        if (!isPageContinuation(state.lastUrl, next) || !safeTimelineUrl(state.first.url) || !safeTimelineUrl(next)) {
+            state.failure = "无法继续加载，请刷新后重试"
+            return
+        }
+        val client = service
+        val expectedOrigin = origin
+        state.loading = true
+        state.failure = null
+        val requestId = ++state.requestId
+        timelineJobs[first.url] = scope.launch {
+            try {
+                val result = client.fetch(next)
+                if (!isActive || origin != expectedOrigin || requestId != state.requestId) return@launch
+                if (handleTimelineLogin(result, first.url)) {
+                    state.failure = "请登录后重试"
+                } else if (!isSamePageList(state.first.url, result.url) || !isPageContinuation(state.lastUrl, result.url) ||
+                    Regex("[?&]page=([0-9]+)").find(next)?.groupValues?.get(1) != Regex("[?&]page=([0-9]+)").find(result.url)?.groupValues?.get(1)) {
+                    state.failure = "内容已变化，请刷新后重试"
+                } else {
+                    refreshPurchaseState(result)
+                    rememberCachedPage(result, next)
+                    state.append(result, next)
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (origin == expectedOrigin && requestId == state.requestId) state.failure = friendlyError(e) }
+            finally { if (requestId == state.requestId) state.loading = false }
+        }
+    }
+
+    fun refreshTimeline(first: PageData, search: Pair<String, String>? = null) {
+        if (!safeTimelineUrl(first.url)) { toast = "请重新打开页面后刷新"; return }
+        val state = timelineFor(first)
+        if (state.refreshing || purchaseBusy || siteBusy) return
+        val requestId = ++state.requestId
+        timelineJobs.remove(first.url)?.cancel()
+        state.loading = false
+        state.refreshing = true
+        val client = service
+        val expectedOrigin = origin
+        timelineJobs[first.url] = scope.launch {
+            try {
+                val result = if (search != null) client.search(search.first, search.second)
+                    else client.fetch(if (first.posts.isEmpty()) firstPageUrl(first.url) else first.url)
+                if (!isActive || origin != expectedOrigin || requestId != state.requestId || handleTimelineLogin(result, first.url)) return@launch
+                if (!safeTimelineUrl(result.url) || (search == null && !isSamePageList(first.url, result.url))) {
+                    toast = "内容已变化，请重新打开页面"; return@launch
+                }
+                rememberCachedPage(result, first.url)
+                // Search receipts can issue a new result URL. Keep this screen's
+                // aggregation and search alias attached to the new receipt.
+                pageCache.entries.filter { it.key.startsWith("search:") && it.value.url == first.url }
+                    .map { it.key }.forEach { pageCache[it] = result }
+                timelines[result.url] = state
+                state.reset(result)
+                if (home?.url == first.url) home = result
+                if (siteFavorites?.url == first.url) siteFavorites = result
+                if (page?.url == first.url) page = result
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (origin == expectedOrigin && requestId == state.requestId) toast = friendlyError(e) }
+            finally { if (requestId == state.requestId) state.refreshing = false }
+        }
+    }
+
+    private fun handleTimelineLogin(result: PageData, returnUrl: String): Boolean {
+        if (result.authStatus != AuthStatus.LOGIN_REQUIRED) return false
+        loginReturnUrl = loginDestination(returnUrl)
+        home = home?.copy(authenticated = false, authStatus = AuthStatus.LOGIN_REQUIRED)
+        showLogin = true
+        sessionNotice = "登录已失效，请重新登录"
+        return true
+    }
+
+    private fun clearTimelines() {
+        timelineJobs.values.forEach { it.cancel() }
+        timelineJobs.clear(); timelines.clear()
+    }
     val authenticated get() = home?.authenticated == true
+    val editorDirty: Boolean get() {
+        val form = editor ?: return false
+        return draftTitle != form.fields[form.titleField].orEmpty() ||
+            draftContent != form.fields[form.contentField].orEmpty() ||
+            draftRecipient != form.fields[form.recipientField].orEmpty() ||
+            draftCategory != form.fields["p_type"].orEmpty() ||
+            draftKeywords != form.fields["diy_guanjianci"].orEmpty() || editorFiles.isNotEmpty()
+    }
     val canBack get() = gallery != null || showSiteTools || pendingSiteDestination != null || pendingSiteSubmission != null || loadingEditor || pendingPurchase != null || editor != null || showSettings || showLogin || backStack.isNotEmpty()
 
     init { store.put("selected_origin", origin); refreshCatalog(); load("index.php", push = false) }
 
-    private fun work(editorRequest: Boolean = false, task: suspend () -> Unit) {
+    private fun work(editorRequest: Boolean = false, task: suspend (() -> Boolean) -> Unit) {
         val version = ++requestVersion
+        val expectedOrigin = origin
         loadingEditor = editorRequest
         requestJob?.cancel()
         requestJob = scope.launch {
             busy = true; error = null
-            try { task() }
+            try { task { version == requestVersion && expectedOrigin == origin && isActive } }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (version == requestVersion) error = friendlyError(e) }
             finally { if (version == requestVersion) { busy = false; loadingEditor = false; loadingUrl = null } }
@@ -116,6 +241,7 @@ class AppController(
         val sourcePath = (requestedUrl ?: result.url).substringBefore('?').substringAfterLast('/')
         if (!allowLoginWall && result.authStatus == AuthStatus.LOGIN_REQUIRED && sourcePath != "login.php") return
         pageCache[result.url] = result
+        timelines.values.distinct().forEach { it.updatePage(result) }
         if (requestedUrl != null && requestedUrl != result.url) pageCache[requestedUrl] = result
         while (pageCache.size > 32) {
             val current = page?.url
@@ -129,6 +255,8 @@ class AppController(
 
     /** A destination's own page, retained across predictive back and tab switches. */
     fun pageFor(url: String): PageData? = pageCache[url] ?: pageCache[url.substringBefore('#')]
+        ?: timelines[url.substringBefore('#')]?.first
+        ?: timelines[resolve(url).url.substringBefore('#')]?.first
 
     /**
      * Loads a destination page once. Returning to a destination reuses its
@@ -143,6 +271,14 @@ class AppController(
 
     fun activatePage(active: PageData) {
         if (page?.url != active.url || page !== active) page = active
+        rememberMailbox(active)
+    }
+
+    private fun rememberMailbox(active: PageData) {
+        if (active.url.substringBefore('?').endsWith("/message.php") &&
+            (work.miaola.kf.ui.KfDestinations.fromUrl(active.url) == work.miaola.kf.ui.KfDestinationKind.MESSAGES ||
+                active.url.contains("action=scout") && active.nativePage?.hasMessageList == true))
+            messageListUrl = active.url
     }
 
     fun resolve(url: String, title: String = ""): SiteDestination = service.destination(url, title)
@@ -160,8 +296,10 @@ class AppController(
         loadingUrl = url
         work {
             val result = service.fetch(url)
+            if (!it()) return@work
             refreshPurchaseState(result)
             page = result
+            rememberMailbox(result)
             rememberCachedPage(result, url)
             showSiteTools = false
             if (url.substringBefore('?').substringAfterLast('/') == "index.php" && result.authStatus != AuthStatus.UNKNOWN) home = result
@@ -205,12 +343,13 @@ class AppController(
 
     fun selectTab(value: HomeTab) {
         if (purchaseBusy || siteBusy) return
+        if (tab == value) { reselectTab(value); return }
         cancelRequest(); error = null
         backStack.clear(); tab = value; editor = null; showSettings = false; showSiteTools = false
         when (value) {
-            HomeTab.FEED -> { page = home; load("index.php", false) }
+            HomeTab.FEED -> { page = home; if (home == null) load("index.php", false) }
             HomeTab.BOARDS -> { page = home; if (home == null) load("index.php", false) }
-            HomeTab.MESSAGES -> { page = null; load("message.php", false) }
+            HomeTab.MESSAGES -> { page = pageFor("message.php"); if (page == null) load("message.php", false) }
             HomeTab.ACCOUNT -> { page = home; refreshAccountAvatar() }
         }
     }
@@ -292,6 +431,8 @@ class AppController(
                         showLogin = true
                     } else {
                         siteFavorites = result
+                        rememberCachedPage(result)
+                        timelines[result.url]?.reset(result)
                     }
                 }
             } catch (e: CancellationException) {
@@ -453,6 +594,7 @@ class AppController(
 
     fun favoriteThread(destination: SiteDestination?) {
         if (destination == null || purchaseBusy || siteBusy || dailyBusy) return
+        if (SiteActionRisk.needsConfirmation(destination)) { pendingSiteDestination = destination; return }
         if (!authenticated) {
             loginReturnUrl = page?.url?.let(::loginDestination)
             showLogin = true
@@ -473,7 +615,7 @@ class AppController(
                             showLogin = true
                             error = "登录状态已失效，请重新登录"
                         } else {
-                            toast = "已收藏本帖"
+                            toast = result.page.notice.ifBlank { SiteActionRisk.successMessage(destination) }
                             // Re-read the reader so its favorite entry matches the
                             // site immediately (the site swaps add/remove links).
                             if (threadUrl != null && page?.url == threadUrl) {
@@ -517,9 +659,11 @@ class AppController(
         if (username.isBlank() || password.isEmpty()) { error = "请输入用户名和密码"; return }
         work {
             val result = service.login(username.trim(), password)
+            if (!it()) return@work
             val destination = loginReturnUrl
             loginReturnUrl = null
             pageCache.clear()
+            clearTimelines()
             home = result
             rememberCachedPage(result, "index.php")
             showLogin = false; sessionNotice = null; toast = "登录成功"
@@ -528,6 +672,7 @@ class AppController(
             else {
                 if (backStack.isEmpty()) backStack.add(result to HomeTab.FEED)
                 val restored = service.fetch(destination)
+                if (!it()) return@work
                 refreshPurchaseState(restored); page = restored; rememberCachedPage(restored, destination)
             }
         }
@@ -544,6 +689,7 @@ class AppController(
             } catch (_: Exception) {
                 return@work
             }
+            if (!it()) return@work
             if (result.authStatus == AuthStatus.UNKNOWN) {
                 return@work
             }
@@ -556,6 +702,7 @@ class AppController(
             if (result.authenticated && accountAvatar == null) refreshAccountAvatar()
             if (result.authenticated && editor == null && page?.posts?.isNotEmpty() == true) {
                 val refreshed = service.fetch(page!!.url)
+                if (!it()) return@work
                 refreshPurchaseState(refreshed)
                 page = refreshed
                 rememberCachedPage(refreshed)
@@ -568,21 +715,33 @@ class AppController(
             && !it.contains("action=del") && !it.contains("action=write")
     }
 
+    private fun visiblePosts(): List<ForumPost> = page?.let { timelines[it.url]?.posts ?: it.posts }.orEmpty()
+
     private fun refreshPurchaseState(result: PageData) {
-        val previous = page?.posts.orEmpty().flatMap { it.purchases }
+        val previous = visiblePosts().flatMap { it.purchases }
         previous.forEach { offer ->
-            result.posts.firstOrNull { it.id == offer.postId && it.purchases.isEmpty() && !it.purchaseLocked }?.let {
+            result.posts.firstOrNull { isSamePageList(offer.threadUrl, result.url) && it.id == offer.postId && it.purchases.isEmpty() && !it.purchaseLocked }?.let {
                 store.remove(purchasePendingKey(origin, offer.id))
             }
         }
-        uncertainPurchases = result.posts.flatMap { it.purchases }.filter { store.get(purchasePendingKey(origin, it.id)) != null }.map { it.id }.toSet()
+        val offers = visiblePosts().filterNot { old -> result.posts.any { it.id == old.id } }.flatMap { it.purchases } + result.posts.flatMap { it.purchases }
+        uncertainPurchases = offers.filter { store.get(purchasePendingKey(origin, it.id)) != null }.map { it.id }.toSet()
     }
 
     fun requestPurchase(offer: PurchaseOffer) {
         if (purchaseBusy || busy) return
         if (!authenticated) { loginReturnUrl = page?.url?.let(::loginDestination); showLogin = true; return }
-        if (page?.posts?.flatMap { it.purchases }?.any { it == offer } != true) return
+        if (visiblePosts().flatMap { it.purchases }.none { it == offer }) return
         if (offer.id in uncertainPurchases) { error = "购买结果待确认，请先刷新"; return }
+        page?.url?.let { url ->
+            timelines[url]?.let { state ->
+                if (state.loading) {
+                    state.requestId++
+                    timelineJobs.remove(url)?.cancel()
+                    state.loading = false
+                }
+            }
+        }
         pendingPurchase = offer
     }
 
@@ -596,7 +755,11 @@ class AppController(
             try {
                 when (val result = service.purchase(offer)) {
                     is PurchaseResult.Success -> {
-                        refreshPurchaseState(result.page); page = result.page; rememberCachedPage(result.page); pendingPurchase = null
+                        refreshPurchaseState(result.page)
+                        val activeUrl = page?.url
+                        rememberCachedPage(result.page)
+                        if (activeUrl == result.page.url || activeUrl == null) page = result.page
+                        pendingPurchase = null
                         uncertainPurchases = uncertainPurchases - offer.id
                         toast = result.message
                     }
@@ -617,11 +780,14 @@ class AppController(
         }
     }
 
-    fun search(keyword: String, author: String = "", cacheKey: String? = null) {
+    fun search(keyword: String, author: String = "", cacheKey: String? = null, push: Boolean = true) {
         if (keyword.isBlank() && author.isBlank()) return
-        rememberNavigationSource()
+        lastSearchKeyword = keyword.trim(); lastSearchAuthor = author.trim()
+        if (push) rememberNavigationSource()
         work {
             val result = service.search(keyword.trim(), author.trim())
+            if (!it()) return@work
+            if (handleTimelineLogin(result, page?.url ?: "index.php")) return@work
             page = result
             rememberCachedPage(result)
             if (cacheKey != null) pageCache[cacheKey] = result
@@ -632,14 +798,28 @@ class AppController(
     fun ensureSearch(cacheKey: String, keyword: String, author: String) {
         if (pageCache[cacheKey] != null) return
         if (busy) return
-        search(keyword, author, cacheKey)
+        search(keyword, author, cacheKey, push = false)
+    }
+
+    fun ensureSearchResult(url: String) {
+        if (pageFor(url) != null || busy) return
+        val destination = resolve(url)
+        if (!work.miaola.kf.ui.KfDestinations.isSearchNavigation(destination.url) ||
+            !destination.url.startsWith("$origin/search.php?")) return
+        work {
+            val result = service.fetch(destination.url)
+            if (!it()) return@work
+            if (!handleTimelineLogin(result, url)) rememberCachedPage(result, url)
+        }
     }
 
     fun openEditor(url: String) {
         if (busy || purchaseBusy) return
+        if (resolve(url).effect != SiteEffect.READ) { toast = "请从发帖或回复入口打开编辑器"; return }
         if (!authenticated) { loginReturnUrl = page?.url?.let(::loginDestination); showLogin = true; return }
         work(editorRequest = true) {
             val form = service.editor(url)
+            if (!it()) return@work
             editor = form
             editorFiles = emptyList()
             nextUploadSlot = 1
@@ -669,12 +849,14 @@ class AppController(
             if ("diy_guanjianci" in form.fields) values["diy_guanjianci"] = draftKeywords
             when (val result = service.submitWithFiles(form, values, editorFiles)) {
                 is SubmitResult.Success -> {
+                    if (!it()) return@work
                     editor = null; editorFiles = emptyList(); draftContent = ""; draftTitle = ""; toast = result.message
                     val submitted = service.fetch(result.url ?: page?.url ?: "index.php")
+                    if (!it()) return@work
                     page = submitted; rememberCachedPage(submitted, result.url)
                 }
-                is SubmitResult.Rejected -> error = result.message
-                is SubmitResult.Uncertain -> { submitUncertain = form.recipientField == null; error = result.message }
+                is SubmitResult.Rejected -> if (it()) error = result.message
+                is SubmitResult.Uncertain -> if (it()) { submitUncertain = true; error = result.message }
             }
         }
     }
@@ -686,6 +868,7 @@ class AppController(
     }
     fun requestBack() {
         if (purchaseBusy || siteBusy) return
+        if (editor != null && busy && !loadingEditor) return
         if (gallery != null) { gallery = null; return }
         if (pendingSiteSubmission != null || pendingSiteDestination != null) { dismissSiteAction(); return }
         if (showSiteTools) { showSiteTools = false; return }
@@ -693,7 +876,7 @@ class AppController(
         if (showEmoticonPicker) { showEmoticonPicker = false; return }
         if (pendingPurchase != null) { pendingPurchase = null; return }
         if (loadingEditor) { cancelRequest(); return }
-        if (editor != null && (draftContent.isNotBlank() || draftTitle.isNotBlank())) confirmDiscard = true
+        if (editorDirty) confirmDiscard = true
         else back()
     }
     fun back() {
@@ -724,6 +907,7 @@ class AppController(
         origin = normalized; store.put("selected_origin", origin)
         dailySigned = store.get("daily_signed@$origin") == localDayKey()
         pageCache.clear()
+        clearTimelines()
         service = factory.create(origin); page = null; home = null; backStack.clear(); busy = false
         bookmarks = readBookmarks(); history = readHistory(); tab = HomeTab.FEED
         showSettings = false; showLogin = false; load("index.php", false)
@@ -753,10 +937,10 @@ class AppController(
         if (destination.effect != SiteEffect.UNSUPPORTED && destination.url.startsWith("https://") && listOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp").any { path.endsWith(it) }) {
             showImages(destination.url, listOf(destination.url)); return
         }
-        // Message actions keep the site's direct behavior; no app-level
-        // confirmation or durable guard.
-        if (destination.effect == SiteEffect.CHANGE && destination.url.substringBefore('?').endsWith("message.php")) {
-            startSiteAction(null, destination); return
+        if (destination.effect == SiteEffect.CHANGE && !SiteActionRisk.needsConfirmation(destination)) {
+            if (destination.url.substringBefore('?').endsWith("kf_tidfavor.php")) favoriteThread(destination)
+            else startSiteAction(null, destination)
+            return
         }
         when (destination.effect) {
             SiteEffect.READ -> {
@@ -775,9 +959,7 @@ class AppController(
                 formFiles["${form.id}@${field.id}"].orEmpty().map { FilePart(field.name, it) }
             }
             val submission = SiteSubmission(form, values, files, submit)
-            // Messages behave like the site: submit directly, no app-level
-            // confirmation gate or durable duplicate marker.
-            if (form.sourceUrl.substringBefore('?').endsWith("message.php")) {
+            if (!SiteActionRisk.needsConfirmation(submission)) {
                 pendingSiteSubmission = null
                 startSiteAction(submission, null)
             } else pendingSiteSubmission = submission
@@ -801,15 +983,59 @@ class AppController(
             return
         }
         siteBusy = true; error = null
+        val direct = if (form != null) !SiteActionRisk.needsConfirmation(form) else link?.let { !SiteActionRisk.needsConfirmation(it) } == true
+        val actionPage = page
         val messageFlow = form?.form?.sourceUrl?.substringBefore('?')?.endsWith("message.php") == true ||
             link?.url?.substringBefore('?')?.endsWith("message.php") == true
+        val favoritesFlow = form?.form?.sourceUrl?.let { it.substringBefore('?').endsWith("profile.php") && it.contains("action=favor") } == true
+        val messageSource = if (messageFlow && (form != null || Regex("[?&]action=(del|unread)(?:&|$)").containsMatchIn(link?.url.orEmpty()))) {
+            val candidate = form?.form?.sourceUrl ?: messageListUrl
+            val requestedBox = Regex("[?&]towhere=(receivebox|sendbox|scout)(?:&|$)").find(link?.url.orEmpty())?.groupValues?.get(1)
+            when {
+                form?.form?.fields?.any { it.name == "banidinfo" } == true -> form.form.sourceUrl
+                candidate != null && resolve(candidate).effect == SiteEffect.READ &&
+                    (requestedBox == null || candidate.contains("action=$requestedBox") || requestedBox == "receivebox" && !candidate.contains("action=")) -> candidate
+                requestedBox != null -> "$origin/message.php?action=$requestedBox"
+                else -> null
+            }
+        } else null
+        val managedReturn = when {
+            favoritesFlow -> actionPage?.url?.takeIf { isSamePageList(it, form.form.sourceUrl) } ?: form.form.sourceUrl
+            messageFlow -> messageSource
+            else -> null
+        }
         siteJob = scope.launch {
             try {
-                val result = if (form != null) service.submitSite(form) else service.executeSite(link!!)
+                val response = if (form != null) service.submitSite(form) else service.executeSite(link!!)
+                val result = if (managedReturn != null && response is SiteActionResult.Response && response.page.authStatus != AuthStatus.LOGIN_REQUIRED) {
+                    // Read back the source list, not a legacy receipt/action URL.
+                    val fresh = try { service.fetch(managedReturn) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                    if (fresh != null) SiteActionResult.Response(fresh, response.uncertainReceipt) else response
+                } else response
                 when (result) {
                     is SiteActionResult.Response -> {
-                        rememberNavigationSource(); page = result.page; rememberCachedPage(result.page)
-                        showSiteTools = !messageFlow
+                        val stillHere = page?.url == actionPage?.url
+                        val managedFresh = managedReturn != null && isSamePageList(managedReturn, result.page.url)
+                        if (managedFresh) {
+                            managementRevision++
+                            // Deleting/moving changes page boundaries. Old tails,
+                            // selection contexts and in-flight appends are invalid.
+                            val affected = timelines.values.distinct().filter { isSamePageList(it.first.url, managedReturn) }
+                            val retained = affected.firstOrNull { it.first.url == managedReturn || it.first.url == result.page.url }
+                            affected.forEach { state -> state.requestId++; state.loading = false; state.refreshing = false; state.reset(result.page) }
+                            timelines.keys.filter { key -> isSamePageList(key, managedReturn) }.toList().forEach { key -> timelineJobs.remove(key)?.cancel(); timelines.remove(key) }
+                            retained?.let { timelines[result.page.url] = it; timelines[managedReturn] = it }
+                            pageCache.keys.filter { key -> isSamePageList(resolve(key).url, managedReturn) }.toList().forEach(pageCache::remove)
+                            if (stillHere) page = result.page
+                            rememberCachedPage(result.page, managedReturn)
+                            if (stillHere && messageFlow) pendingNativePage = managedReturn
+                        } else if (!direct && stillHere) { rememberNavigationSource(); page = result.page }
+                        if (favoritesFlow) {
+                            siteFavorites = null
+                        }
+                        rememberCachedPage(result.page)
+                        if (messageFlow && !managedFresh && stillHere && result.page.url != actionPage?.url) pendingNativePage = result.page.url
+                        showSiteTools = !direct && !messageFlow && !favoritesFlow
                         if (showSiteTools) pendingNativePage = result.page.url
                         if (result.page.authStatus == AuthStatus.AUTHENTICATED) {
                             showLogin = false
@@ -817,9 +1043,16 @@ class AppController(
                         }
                         if (result.page.authStatus == AuthStatus.LOGIN_REQUIRED) {
                             home = result.page; backStack.clear(); editor = null; showLogin = true; showSiteTools = false
+                            pendingNativePage = null
+                            toast = result.page.notice.takeIf { it.isNotBlank() }
+                            return@launch
                         }
                         formFiles = emptyMap()
-                        toast = if (result.uncertainReceipt != null) "操作已提交，结果请在站点记录中核对" else "站点已返回结果，请核对页面提示"
+                        toast = when {
+                            result.uncertainReceipt != null -> "操作已提交，请刷新核对结果"
+                            direct -> result.page.notice.ifBlank { SiteActionRisk.successMessage(link) }
+                            else -> result.page.notice.ifBlank { "操作已完成" }
+                        }
                     }
                     is SiteActionResult.Rejected -> error = result.message
                     is SiteActionResult.Uncertain -> error = result.message
@@ -852,13 +1085,15 @@ class AppController(
         rememberNavigationSource()
         work {
             val result = service.fetch("login.php")
+            if (!it()) return@work
             page = result; rememberCachedPage(result, "login.php")
             showLogin = false; showSiteTools = true; pendingNativePage = "login.php"
         }
     }
     fun checkEditorSubmission() {
+        val message = editor?.recipientField != null
         editor = null; showEmoticonPicker = false
-        load(page?.url ?: "index.php", false)
+        load(if (message) "$origin/message.php?action=sendbox" else page?.url ?: "index.php", false)
     }
     fun showImages(selected: String, images: List<String>) {
         val list = images.filter { it.startsWith("https://") }.distinct().take(100)
@@ -876,7 +1111,10 @@ class AppController(
     }
     fun consumeNativePage() { pendingNativePage = null }
     private fun clearNativeTransientState() {
+        lastSearchKeyword = ""; lastSearchAuthor = ""
+        messageListUrl = null
         showSiteTools = false; pendingNativePage = null; pendingSiteDestination = null; pendingSiteSubmission = null
+        showTopicFilters = false
         dailyStatusJob?.cancel(); dailyStatusJob = null
         dailyBusy = false
         filePickerRequest = null; formFiles = emptyMap(); editorFiles = emptyList(); gallery = null
@@ -893,6 +1131,7 @@ class AppController(
         draftContent = ""; draftTitle = ""; draftRecipient = ""
         draftCategory = ""; draftKeywords = ""
         backStack.clear(); pageCache.clear(); showLogin = true; busy = false
+        clearTimelines()
         loginReturnUrl = null; pendingPurchase = null; showEmoticonPicker = false
         clearFavorites()
         clearNativeTransientState()
@@ -915,5 +1154,5 @@ class AppController(
     private fun readHistory() = readLinks("history")
     private fun saveLinks(key: String, links: List<SiteLink>) = store.put("$key@$origin", links.joinToString("\n") { "${it.url.replace("\n", "").replace("\t", "")}\t${it.title.replace("\n", " ").replace("\t", " ")}" })
     fun clearHistory() { history = emptyList(); store.remove("history@$origin") }
-    fun close() { cancelRequest(); purchaseJob?.cancel(); siteJob?.cancel(); favoritesJob?.cancel(); catalogJob?.cancel(); avatarJob?.cancel(); service.close() }
+    fun close() { cancelRequest(); clearTimelines(); purchaseJob?.cancel(); siteJob?.cancel(); favoritesJob?.cancel(); catalogJob?.cancel(); avatarJob?.cancel(); service.close() }
 }

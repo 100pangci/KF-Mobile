@@ -111,6 +111,7 @@ data class PageData(
     val serverLogout: SiteDestination? = null,
     val favorite: SiteDestination? = null,
     val dailyBonus: SiteDestination? = null,
+    val boardFilters: List<SiteLink> = emptyList(),
 )
 
 enum class AuthStatus { AUTHENTICATED, LOGIN_REQUIRED, UNKNOWN }
@@ -179,7 +180,7 @@ interface ForumService {
     suspend fun search(keyword: String, author: String = ""): PageData
     suspend fun editor(url: String): EditorForm
     suspend fun submit(form: EditorForm, values: Map<String, String>): SubmitResult
-    suspend fun purchase(offer: PurchaseOffer): PurchaseResult = PurchaseResult.Rejected("当前服务暂不支持原生购买，请先查看站点记录")
+    suspend fun purchase(offer: PurchaseOffer): PurchaseResult = PurchaseResult.Rejected("暂不支持购买，请先查看站点记录")
     fun destination(url: String, title: String = ""): SiteDestination = SiteDestination(url, SiteEffect.READ, title)
     suspend fun submitSite(submission: SiteSubmission): SiteActionResult = SiteActionResult.Rejected("当前服务未接入该表单")
     suspend fun executeSite(destination: SiteDestination): SiteActionResult = SiteActionResult.Rejected("当前操作尚未适配")

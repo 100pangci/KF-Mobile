@@ -14,18 +14,31 @@ EXCLUDED = {".secrets", ".gradle", ".kotlin", ".idea", "build", "artifacts", "__
 
 
 def included(relative):
-    return not (set(relative.parts) & EXCLUDED or relative.name in {"local.properties", "login-probe-result.json"}
+    return not (set(relative.parts) & EXCLUDED or private_path(relative)
                 or relative.suffix in {".pyc", ".hprof", ".log"})
 
 
+def private_path(relative):
+    name = relative.name.lower()
+    return (name in {"local.properties", "login-probe-result.json", "cookie.txt", "keystore.properties", ".env"}
+            or name.endswith(".cookies.txt") or name.startswith(".env.")
+            or relative.suffix.lower() in {".jks", ".keystore", ".p12", ".pfx", ".pem", ".key"})
+
+
 def private_tokens():
-    cookie_path = ROOT / ".secrets" / "kf.miaola.work.cookies.txt"
+    cookie_path = ROOT / "cookie.txt"
+    if not cookie_path.is_file():
+        cookie_path = ROOT / ".secrets" / "kf.miaola.work.cookies.txt"
     if not cookie_path.exists():
         return []
+    text = cookie_path.read_text(encoding="utf-8")
+    if "\t" not in text:
+        return [pair.split("=", 1)[1].strip().encode("utf-8")
+                for pair in text.removeprefix("Cookie:").strip().split(";")
+                if "=" in pair and len(pair.split("=", 1)[1].strip()) >= 16]
     jar = http.cookiejar.MozillaCookieJar()
     jar.load(str(cookie_path), ignore_discard=True, ignore_expires=True)
-    return [c.value.encode("utf-8") for c in jar
-            if c.name in {"2ed4e_winduser", "2ed4e_ck_info", "PHPSESSID"} and len(c.value) > 16]
+    return [c.value.encode("utf-8") for c in jar if len(c.value) >= 16]
 
 
 def archive_path_allowed(name, source=False):
@@ -33,7 +46,7 @@ def archive_path_allowed(name, source=False):
     if source:
         return included(relative)
     # APKs legitimately contain META-INF/com/android/build/gradle metadata.
-    return not (set(relative.parts) & {".secrets", "__pycache__", ".git"} or relative.name == "local.properties")
+    return not (set(relative.parts) & {".secrets", "__pycache__", ".git"} or private_path(relative))
 
 
 def audit_archive(path, tokens, source=False):

@@ -205,7 +205,7 @@ class AppControllerTest {
         c.close()
     }
 
-    @Test fun messageFormSubmitsWithoutAppConfirmationOrPendingGuard() = runTest {
+    @Test fun messageDeletionRequiresExplicitConfirmation() = runTest {
         val factory = DemoFactory()
         val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })
         runCurrent()
@@ -213,6 +213,9 @@ class AppControllerTest {
             listOf(SiteField("f", "delid[]", "第一封", SiteFieldKind.CHECKBOX, listOf("1"), listOf(FormOption("1", "第一封")))),
             listOf(SiteSubmit("执行", null, "")))
         c.requestSiteSubmit(form, mapOf("f" to listOf("1")), form.submits.single()); runCurrent()
+        assertNotNull(c.pendingSiteSubmission)
+        assertEquals(0, factory.services.getValue(c.origin).siteSubmissions)
+        c.confirmSiteAction(); runCurrent()
         assertNull(c.pendingSiteSubmission)
         assertEquals(1, factory.services.getValue(c.origin).siteSubmissions)
         c.close()

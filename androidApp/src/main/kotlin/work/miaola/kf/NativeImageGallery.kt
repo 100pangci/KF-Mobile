@@ -27,6 +27,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.activity.compose.BackHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -34,22 +35,26 @@ import kotlinx.coroutines.withContext
 fun NativeImageGallery(origin: String, gallery: ImageGallery, onClose: () -> Unit, save: (String) -> Unit, message: String? = null) {
     val pager = rememberPagerState(initialPage = gallery.initialIndex) { gallery.urls.size }
     var zoomedPage by remember { mutableIntStateOf(-1) }
-    Column(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
-        Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
+    var chrome by remember { mutableStateOf(true) }
+    BackHandler(onBack = onClose)
+    Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
+        HorizontalPager(pager, Modifier.fillMaxSize(), userScrollEnabled = zoomedPage != pager.currentPage) { index ->
+            ZoomableNativeImage(origin, gallery.urls[index], onTap = { chrome = !chrome }) { zoomed -> if (zoomed) zoomedPage = index else if (zoomedPage == index) zoomedPage = -1 }
+        }
+        if (chrome) Row(Modifier.fillMaxWidth().height(56.dp).align(Alignment.TopCenter).background(Color.Black.copy(alpha = 0.6f)), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onClose) { Icon(Icons.Default.Close, "关闭图片", tint = Color.White) }
             Text("${pager.currentPage + 1} / ${gallery.urls.size}", Modifier.weight(1f), color = Color.White)
             IconButton(onClick = { save(gallery.urls[pager.currentPage]) }) { Icon(Icons.Default.Download, "保存原图", tint = Color.White) }
         }
-        HorizontalPager(pager, Modifier.weight(1f).fillMaxWidth(), userScrollEnabled = zoomedPage != pager.currentPage) { index ->
-            ZoomableNativeImage(origin, gallery.urls[index]) { zoomed -> if (zoomed) zoomedPage = index else if (zoomedPage == index) zoomedPage = -1 }
+        if (chrome) Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.6f)), horizontalAlignment = Alignment.CenterHorizontally) {
+            message?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Color.White, style = MaterialTheme.typography.bodySmall) }
+            Text("双指缩放 · 双击放大", Modifier.padding(16.dp), color = Color.LightGray, style = MaterialTheme.typography.labelSmall)
         }
-        message?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 8.dp), color = Color.White, style = MaterialTheme.typography.bodySmall) }
-        Text("双指缩放 · 双击放大", Modifier.align(Alignment.CenterHorizontally).padding(16.dp), color = Color.LightGray, style = MaterialTheme.typography.labelSmall)
     }
 }
 
 @Composable
-private fun ZoomableNativeImage(origin: String, url: String, zoomed: (Boolean) -> Unit) {
+private fun ZoomableNativeImage(origin: String, url: String, onTap: () -> Unit, zoomed: (Boolean) -> Unit) {
     val context = LocalContext.current
     var drawable by remember(origin, url) { mutableStateOf<Drawable?>(null) }
     var failed by remember(origin, url) { mutableStateOf(false) }
@@ -58,6 +63,7 @@ private fun ZoomableNativeImage(origin: String, url: String, zoomed: (Boolean) -
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
     var viewport by remember { mutableStateOf(IntSize.Zero) }
     val onZoomed by rememberUpdatedState(zoomed)
+    val onSingleTap by rememberUpdatedState(onTap)
     LaunchedEffect(scale) { onZoomed(scale > 1.01f) }
     LaunchedEffect(origin, url, attempt) {
         failed = false
@@ -79,7 +85,7 @@ private fun ZoomableNativeImage(origin: String, url: String, zoomed: (Boolean) -
         if (image != null) AndroidView(factory = { ImageView(it).apply { scaleType = ImageView.ScaleType.FIT_CENTER; contentDescription = "帖子图片" } },
             modifier = Modifier.fillMaxSize().graphicsLayer { scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y }
                 .transformable(transform, canPan = { scale > 1.01f })
-                .pointerInput(url) { detectTapGestures(onDoubleTap = { scale = if (scale > 1.01f) 1f else 2.5f; offset = Offset.Zero }) },
+                .pointerInput(url) { detectTapGestures(onTap = { onSingleTap() }, onDoubleTap = { scale = if (scale > 1.01f) 1f else 2.5f; offset = Offset.Zero }) },
             onReset = null,
             onRelease = { (it.drawable as? Animatable)?.stop(); it.setImageDrawable(null) },
             update = { view -> if (view.drawable !== image) { (view.drawable as? Animatable)?.stop(); view.setImageDrawable(image); (image as? Animatable)?.start() } })

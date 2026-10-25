@@ -14,8 +14,9 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val source = sourceUrl.toHttpUrl()
         val path = source.pathSegments.lastOrNull().orEmpty()
         val action = source.queryParameter("action").orEmpty()
-        val main = (doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") }
-            ?: doc.selectFirst("#main, #content, #alldiv") ?: doc.body()).clone()
+        val mainOriginal = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") }
+            ?: doc.selectFirst("#main, #content, #alldiv") ?: doc.body()
+        val main = mainOriginal.clone()
         main.select("script,style,.topmenuo,#kf_information,.rightboxa,#cnzz_stat_icon_1257832900").remove()
         main.select("img[src*=ys/top]").forEach { it.parent()?.remove() }
         val title = when (path) {
@@ -34,7 +35,6 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             "login.php" -> "账号登录"
             else -> doc.title().substringBefore(" - ").trim().ifBlank { "站点功能" }
         }
-        val mainOriginal = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") } ?: doc.body()
         val forms = mainOriginal.select("form").filterNot { it.attr("action").startsWith("search.php") || it.attr("name") == "delatc" || it.attr("name") == "preview" }
             .mapIndexedNotNull { index, form -> parseForm(form, sourceUrl, "$path:$index", title) }
             .toMutableList()
@@ -68,11 +68,16 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             if (control.attr("name") !in listOf("chkall")) unsupported.add(label)
             null
         }
-        if (profile != null) work.select("table.log1").forEach { it.remove() }
-        if (path == "profile.php" && action == "modify") work.select("table.log1").forEach { it.remove() }
+        if (profile != null) work.selectFirst("table.log1")?.remove()
+        if (path == "profile.php" && action == "modify") work.select("table.log1 tr").forEach { row ->
+            // Field widgets already have a dedicated editor; don't also discard
+            // new explanatory rows or unrelated tables introduced by the server.
+            if (row.select("input,textarea,select,button").isNotEmpty()) row.remove()
+        }
         work.select("input,textarea,select,button,iframe,object,embed").remove()
         work.select("a[onclick],a[href^=javascript:]").forEach { it.remove() }
         var messageBody: String? = null
+        var message: NativeMessageDetail? = null
         val messageActions = mutableListOf<SiteDestination>()
         if (path == "message.php") {
             // The mailbox quota + folder navigation table is duplicated by the
@@ -96,14 +101,20 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
                         val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
                         if (text.isNotBlank()) messageActions.add(routes.classify(target, text))
                     }
-                    // The message body is the two-cell row before the option
-                    // row with the most content; labels are never inspected.
+                    // The stable detail template places content immediately
+                    // before options. A long title is not the message body.
                     val bodyRow = rows.subList(0, optionIndex)
                         .filter { it.select("> td").size == 2 }
-                        .maxByOrNull { it.select("> td").getOrNull(1)?.text()?.length ?: 0 }
+                        .lastOrNull()
                     bodyRow?.select("> td")?.getOrNull(1)?.clone()?.let { cell ->
                         cell.select("script,style").remove()
                         messageBody = cell.html().let { html.cleanContent(it, sourceUrl) }
+                    }
+                    val facts = rows.subList(0, optionIndex).filter { it !== bodyRow && it.select("> td").size == 2 }
+                        .map { it.select("> td")[1].text().trim() }
+                    if (messageBody != null && facts.size >= 3) {
+                        message = NativeMessageDetail(facts[1], facts[0], facts[2], messageBody.orEmpty(), messageActions.toList(),
+                            messageActions.firstOrNull { it.effect == SiteEffect.READ && it.url.toHttpUrl().queryParameter("action") == "write" })
                     }
                     bodyRow?.remove()
                     optionRow.remove()
@@ -147,7 +158,30 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             addLink(routes.classify(html.resolve(href, sourceUrl) ?: href, label))
         }
         val usefulLinks = links.filterNot { link -> path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php") }
-        return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth)
+        val messages = if (path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout")) {
+            mainOriginal.select("a[href*='message.php?']").mapNotNull { a ->
+                val target = html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl() ?: return@mapNotNull null
+                if (target.queryParameter("action") !in setOf("read", "readscout")) return@mapNotNull null
+                val cells = a.closest("tr")?.select("> td").orEmpty()
+                if (cells.size < 6) return@mapNotNull null
+                // Tracking adds a selection column before its read marker.
+                val readCell = cells[if (action == "scout" && cells.size >= 7) 6 else 5]
+                NativeMessageSummary(target.toString(), a.text(), cells[2].text(), cells[3].text(), cells[4].text(),
+                    readCell.text().trim().let { it == "否" || it.contains("未读") || it.contains("未阅读") },
+                    cells[if (action in setOf("sendbox", "scout")) 3 else 2].selectFirst("a[href]")?.let { html.resolve(it.attr("href"), sourceUrl) }.orEmpty())
+            }.distinctBy { it.url }
+        } else emptyList()
+        val favorites = if (path == "profile.php" && action == "favor") parseFavorites(mainOriginal, sourceUrl, forms) else null
+        val bank = if (path == "hack.php" && source.queryParameter("H_name") == "bank" && action.isEmpty()) parseBank(mainOriginal, sourceUrl) else null
+        val blocklist = if (path == "message.php" && action == "banned") forms.firstNotNullOfOrNull { form ->
+            form.fields.singleOrNull { it.name == "banidinfo" && it.kind == SiteFieldKind.MULTILINE }?.let { NativeBlocklist(form.id, it.id) }
+        } else null
+        val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal) else null
+        val messageList = path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout") && mainOriginal.select("tr").any { row ->
+            row.select(">td,>th").map { it.text().trim() }.containsAll(listOf("标题", "发件人", "收件人"))
+        }
+        return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth,
+            messages, message, favorites, bank, blocklist, progress, messageList)
     }
 
     /**
@@ -254,7 +288,8 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             val first = cells.firstOrNull { it.text().isNotBlank() || it.selectFirst("a[href]") != null } ?: return@filterNot false
             val othersBlank = cells.all { it === first || (it.text().isBlank() && it.selectFirst("a[href]") == null) }
             val anchors = first.select("a[href]")
-            if (othersBlank && anchors.size >= 2) {
+            val remainder = first.clone().apply { select("a[href]").remove() }.text().replace(Regex("[\\s·|\\[\\]（）()]+"), "")
+            if (othersBlank && anchors.size >= 2 && remainder.isBlank()) {
                 anchors.forEach { a ->
                     val label = a.text().trim().take(60)
                     val target = html.resolve(a.attr("href"), url) ?: return@forEach
@@ -267,7 +302,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             row.select("> td, > th").take(12).map { cell ->
                 val colspan = cell.attr("colspan").toIntOrNull()?.coerceIn(1, 12) ?: 1
                 val link = cell.selectFirst("a[href]")?.let { a -> html.resolve(a.attr("href"), url) }
-                val text = cell.text().replace(Regex("\\s+"), " ").trim().take(300)
+                val text = cell.text().replace(Regex("\\s+"), " ").trim()
                     .ifBlank { cell.selectFirst("img")?.attr("alt").orEmpty() }
                 NativeCell(
                     text = text,
@@ -281,6 +316,9 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
                     align = when (Regex("text-align\\s*:\\s*(center|right)", RegexOption.IGNORE_CASE).find(cell.attr("style"))?.groupValues?.get(1)?.lowercase()) {
                         "center" -> NativeAlign.CENTER; "right" -> NativeAlign.END; else -> NativeAlign.START
                     },
+                    actions = cell.select("a[href]").mapNotNull { a ->
+                        html.resolve(a.attr("href"), url)?.let { routes.classify(it, a.text().trim()) }
+                    }.filter { it.title.isNotBlank() }.distinctBy { it.url },
                 )
             }
         }.filter { row -> row.any { it.text.isNotBlank() || it.link != null } }
@@ -290,6 +328,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             val span = first.sumOf { it.colspan }
             if (first.size == 1 && span >= columns && first.first().text.isNotBlank()) {
                 val caption = first.first().text
+                navLinks.addAll(first.first().actions)
                 rows = rows.drop(1)
                 if (rows.isEmpty()) return NativeTable(emptyList(), caption = caption, style = NativeTableStyle.NAV, links = navLinks)
                 return finishTable(rows, caption, columns, navLinks)
@@ -446,12 +485,68 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val name = core.getOrNull(0)?.value.orEmpty().ifBlank { core.getOrNull(1)?.value.orEmpty() }.ifBlank { "会员资料" }
         val headline = if (core.size >= 8) core.getOrNull(2) else null
         val stats = if (core.size >= 8) listOfNotNull(core.getOrNull(3), core.getOrNull(6), core.getOrNull(7)) else emptyList()
-        val info = cells.flatten().distinctBy { it.label }
+        val info = cells.flatten().distinct()
         val links = table.select("a[href]").mapNotNull { a ->
             val label = a.text().trim().take(40).ifBlank { a.attr("title").take(40) }
             if (label.isBlank()) null else html.resolve(a.attr("href"), url)?.let { routes.classify(it, label) }
-        }.filter { it.effect != SiteEffect.UNSUPPORTED }.distinctBy { it.url }.take(12)
-        return NativeProfile(name, avatar, info.take(30), links, headline, stats)
+        }.distinctBy { it.url }
+        return NativeProfile(name, avatar, info, links, headline, stats)
+    }
+
+    private fun parseFavorites(main: Element, url: String, forms: List<SiteForm>): NativeFavorites {
+        val bulk = forms.firstOrNull { form -> form.fields.any { it.name == "delid[]" } }
+        val entries = main.select("a[href*='read.php?']").mapNotNull { a ->
+            val target = html.resolve(a.attr("href"), url)?.toHttpUrl() ?: return@mapNotNull null
+            if (target.queryParameter("tid") == null) return@mapNotNull null
+            val row = a.closest("tr") ?: return@mapNotNull null
+            val selectionValue = row.select("input").firstOrNull { it.attr("name") == "delid[]" }?.attr("value")
+            val field = bulk?.fields?.firstOrNull { it.name == "delid[]" && it.options.any { option -> option.value == selectionValue } }
+            NativeFavoriteEntry(SiteLink(a.text(), target.toString(), row.select("> td").drop(1).take(2).joinToString(" · ") { it.text() }), field?.id)
+        }.distinctBy { topicIdentity(it.topic.url) }
+        val categories = main.select("a[href*='profile.php?']").mapNotNull { a ->
+            val target = html.resolve(a.attr("href"), url)?.toHttpUrl() ?: return@mapNotNull null
+            if (target.queryParameter("action") != "favor" || target.queryParameterNames.any { it !in setOf("action", "type") }) return@mapNotNull null
+            routes.classify(target.toString(), a.text())
+        }.distinctBy { it.url }
+        return NativeFavorites(entries, categories)
+    }
+
+    private fun parseBank(main: Element, url: String): NativeBank {
+        val balances = mutableListOf<NativeInfo>()
+        val rules = mutableListOf<String>()
+        // Strip controls first: amounts are account facts, not form initial values.
+        val table = main.selectFirst("table.bank1")?.clone()
+        table?.select("input,textarea,select,button,script,style")?.remove()
+        table?.select("td")?.forEach { cell ->
+            cell.wholeText().split('\n', '|', '｜').map { it.trim() }.filter { it.isNotBlank() }.forEach { line ->
+                val pair = line.split(Regex("[：:]"), limit = 2)
+                if (pair.size == 2 && pair[0].length <= 24 && pair[1].contains(Regex("[0-9]")) &&
+                    pair[0].let { it.contains("贡献") || it.contains("所持") || it.contains("存款") || it.contains("利息") }) {
+                    val amount = Regex("^[-+]?[0-9]+(?:,[0-9]{3})*(?:\\.[0-9]+)?\\s*(?:KFB|%|点|贡献)?", RegexOption.IGNORE_CASE).find(pair[1].trim())?.value?.trim()
+                    if (amount != null) {
+                        balances.add(NativeInfo(pair[0], amount))
+                        val explanation = pair[1].trim().removePrefix(amount).trim()
+                        if (explanation.isNotBlank()) rules.add("${pair[0]}：$explanation")
+                    } else rules.add(line)
+                } else if (line.length > 20) rules.add(line)
+            }
+        }
+        val links = table?.select("a[href]")?.mapNotNull { a -> html.resolve(a.attr("href"), url)?.let { routes.classify(it, a.text()) } }.orEmpty()
+        return NativeBank(balances.distinctBy { it.label }, rules.distinct(), links)
+    }
+
+    private fun parseProgress(main: Element): NativeProgress? {
+        // Observed template: a numeric span following the explicit score label.
+        // Do not derive eligibility, thresholds or timelines from prose/rules.
+        val score = main.select("span,b,strong").firstOrNull { element ->
+            element.text().trim().matches(Regex("[-+]?[0-9]+(?:\\.[0-9]+)?")) &&
+                Regex("当前进度分\\s*[：:]?\\s*$").containsMatchIn(
+                    generateSequence(element.previousSibling()) { it.previousSibling() }.toList().asReversed().joinToString("") { node ->
+                        if (node is TextNode) node.text() else " "
+                    })
+        } ?: return null
+        val status = main.select("span,b,strong").map { it.text().trim() }.filter { it in setOf("已完成", "未完成", "已领取", "未领取") }.distinct()
+        return NativeProgress(listOf(NativeInfo("当前进度分", score.text().trim())), status)
     }
 
     private fun parseForm(form: Element, url: String, id: String, pageTitle: String): SiteForm? {

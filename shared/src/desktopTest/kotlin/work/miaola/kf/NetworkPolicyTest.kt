@@ -10,6 +10,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 
 class NetworkPolicyTest {
@@ -77,6 +78,43 @@ class NetworkPolicyTest {
         val parser = ForumHtmlParser(origin)
         assertEquals("$origin/login.php", parser.resolve("login.php?"))
         listOf("//evil.test/login.php", "https://kf.miaola.work:444/", "http://kf.miaola.work/", "https://user:secret@kf.miaola.work/").forEach { assertNull(parser.resolve(it)) }
+    }
+
+    @Test fun knownReadPathsDoNotAuthorizeUnknownOrDuplicateMutationParameters() {
+        val routes = SiteRoutePolicy(origin)
+        listOf("index.php?do=claim", "thread.php?fid=1&submit=1", "read.php?tid=1&buy=1", "faq.php?action=del",
+            "show.php?uid=1&ok=1", "kf_no1.php?del=1", "profile.php?action=show&do=save",
+            "message.php?action=write&do=delete", "post.php?action=reply&step=1", "fyg_sjcdwj.php?go=fight&xl=1",
+            "read.php?tid=1&%64o=save", "read.php?tid=1&tid=2", "nested/read.php?tid=1").forEach {
+            assertEquals(SiteEffect.CHANGE, routes.classify(it).effect, "Unsafe read classification")
+        }
+        assertEquals(SiteEffect.READ, routes.classify("read.php?spid=1&tid=1").effect)
+    }
+
+    @Test fun readRedirectNeverExecutesMutationAndGetMutationsNeverRetry() = runBlocking {
+        var calls = 0
+        val redirected = HttpForumService(origin, MemoryStore(), Interceptor { chain ->
+            calls++
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(302).message("test")
+                .header("Location", "$origin/kf_growup.php?ok=1").body("".toResponseBody()).build()
+        })
+        try { assertFails { redirected.fetch("index.php") }; assertEquals(1, calls) } finally { redirected.close() }
+        calls = 0
+        val mutation = HttpForumService(origin, MemoryStore(), Interceptor { calls++; throw IOException("offline") })
+        try { assertFails { mutation.raw("kf_growup.php?ok=1") }; assertEquals(1, calls) } finally { mutation.close() }
+    }
+
+    @Test fun multipartRedirectDoesNotReplayThePostBody() = runBlocking {
+        val methods = mutableListOf<String>()
+        val service = HttpForumService(origin, MemoryStore(), Interceptor { chain ->
+            val req = chain.request(); methods.add(req.method)
+            Response.Builder().request(req).protocol(Protocol.HTTP_1_1).code(if (methods.size == 1) 302 else 200).message("test")
+                .apply { if (methods.size == 1) header("Location", "$origin/index.php") }.body("ok".toResponseBody()).build()
+        })
+        try {
+            service.raw("profile.php?action=modify", customBody = "synthetic".toRequestBody())
+            assertEquals(listOf("POST", "GET"), methods)
+        } finally { service.close() }
     }
     @Test fun onlineCacheBuiltInFallback() = runBlocking {
         val store = MemoryStore()

@@ -60,6 +60,7 @@ data class NativeCell(
     val bold: Boolean = false,
     val colspan: Int = 1,
     val align: NativeAlign = NativeAlign.START,
+    val actions: List<SiteDestination> = emptyList(),
 )
 data class NativeTable(
     val rows: List<List<NativeCell>>,
@@ -96,7 +97,24 @@ data class NativeSitePage(
     val tables: List<NativeTable> = emptyList(),
     val blocks: List<NativeBlock> = emptyList(),
     val growth: NativeGrowth? = null,
+    val messages: List<NativeMessageSummary> = emptyList(),
+    val message: NativeMessageDetail? = null,
+    val favorites: NativeFavorites? = null,
+    val bank: NativeBank? = null,
+    val blocklist: NativeBlocklist? = null,
+    val progress: NativeProgress? = null,
+    val messageList: Boolean = false,
 )
+
+data class NativeMessageSummary(val url: String, val title: String, val sender: String, val recipient: String,
+    val time: String, val unread: Boolean, val personUrl: String = "")
+data class NativeMessageDetail(val title: String, val sender: String, val time: String, val html: String,
+    val actions: List<SiteDestination>, val reply: SiteDestination? = null)
+data class NativeFavoriteEntry(val topic: SiteLink, val selectionFieldId: String?)
+data class NativeFavorites(val entries: List<NativeFavoriteEntry>, val categories: List<SiteDestination>)
+data class NativeBank(val balances: List<NativeInfo>, val rules: List<String>, val links: List<SiteDestination>)
+data class NativeBlocklist(val formId: String, val fieldId: String)
+data class NativeProgress(val stats: List<NativeInfo>, val status: List<String> = emptyList())
 
 data class LocalUpload(val id: String, val name: String, val mimeType: String, val bytes: ByteArray, val slot: Int = 0) {
     override fun toString() = "LocalUpload(id=$id, bytes=${bytes.size})"

@@ -52,5 +52,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("kf.projectRoot", rootProject.projectDir.absolutePath)
     inputs.property("liveReadEnabled", providers.environmentVariable("KF_LIVE_TEST").orElse("false"))
     inputs.property("liveLoginEnabled", providers.environmentVariable("KF_LOGIN_TEST").orElse("false"))
-    outputs.upToDateWhen { System.getenv("KF_LIVE_TEST") != "true" && System.getenv("KF_LOGIN_TEST") != "true" }
+    inputs.property("siteAuditEnabled", providers.environmentVariable("KF_SITE_AUDIT").orElse("false"))
+    inputs.property("auditRenderEnabled", providers.environmentVariable("KF_AUDIT_RENDER").orElse("false"))
+    outputs.upToDateWhen { System.getenv("KF_LIVE_TEST") != "true" && System.getenv("KF_LOGIN_TEST") != "true" && System.getenv("KF_SITE_AUDIT") != "true" && System.getenv("KF_AUDIT_RENDER") != "true" }
 }

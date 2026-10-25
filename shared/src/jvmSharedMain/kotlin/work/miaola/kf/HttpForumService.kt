@@ -147,19 +147,25 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         var target = resolve(url)
         require(sameOrigin(referer)) { "请求来源域名不匹配" }
         var payload = fields
+        var requestBody = customBody
         repeat(6) {
             val req = Request.Builder().url(target).header("User-Agent", "KFMobile/0.1 (Android; native client)")
                 .header("Referer", referer).header("Accept", "text/html,application/xhtml+xml")
             payload?.let { req.header("Origin", origin).post(gbkForm(it).toRequestBody("application/x-www-form-urlencoded".toMediaType())) }
-            customBody?.let { req.header("Origin", origin).post(it) }
-            execute(req.build(), if (payload == null && customBody == null) 2 else 0).use { response ->
+            requestBody?.let { req.header("Origin", origin).post(it) }
+            execute(req.build(), if (payload == null && requestBody == null && destination(target).effect == SiteEffect.READ) 2 else 0).use { response ->
                 if (response.code in listOf(301, 302, 303, 307, 308)) {
                     val location = response.header("Location") ?: error("服务器跳转缺少目标地址")
                     val redirected = parser.resolve(location, target) ?: error("已阻止跨域跳转，请在设置中选择目标域名")
                     if (!followRedirects) return@withContext RawPage(response.request.url.toString(), "", redirected)
+                    val receipt = redirected.toHttpUrl()
+                    val searchReceipt = receipt.encodedPath == "/search.php" && !receipt.queryParameter("searchid").isNullOrBlank() &&
+                        work.miaola.kf.ui.KfDestinations.isSearchNavigation(redirected)
+                    require(destination(redirected).effect == SiteEffect.READ || searchReceipt) { "跳转涉及站点操作，已停止自动访问" }
                     target = redirected
-                    require((payload == null && customBody == null) || response.code !in listOf(307, 308)) { "为防止重复操作，已停止自动重发提交" }
+                    require((payload == null && requestBody == null) || response.code !in listOf(307, 308)) { "为防止重复操作，已停止自动重发提交" }
                     payload = null
+                    requestBody = null
                 } else {
                     require(response.isSuccessful) { "服务器响应 ${response.code}，请稍后重试" }
                     val body = response.body ?: error("服务器返回空页面")
@@ -217,7 +223,15 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     override suspend fun submit(form: EditorForm, values: Map<String, String>): SubmitResult {
         require(sameOrigin(form.action) && sameOrigin(form.sourceUrl)) { "提交域名不匹配" }
         gbkForm(form.fields + values) // Validate encoding before making any request.
-        return try {
+        val pendingKey = if (form.recipientField != null) {
+            val intent = listOf(origin, values[form.recipientField].orEmpty().trim(), values[form.titleField].orEmpty(), values[form.contentField].orEmpty())
+                .joinToString("") { "${it.length}:$it" }
+            "message_pending@$origin#" + java.security.MessageDigest.getInstance("SHA-256").digest(intent.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        } else null
+        if (pendingKey != null && store.get(pendingKey) != null) return SubmitResult.Uncertain("这封私信的发送结果待确认，请先查看发件箱，不要重复发送。")
+        // Persist only a digest/marker, never the recipient or private body.
+        pendingKey?.let { store.put(it, "1") }
+        val result = try {
             val raw = raw(form.action, form.fields + values)
             val doc = parser.document(raw.html, raw.url)
             val text = parser.responseMessage(doc)
@@ -237,6 +251,8 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         } catch (e: CancellationException) { throw e }
         catch (_: IOException) { SubmitResult.Uncertain("网络中断，提交可能已送达。请先到网页核对，不要重复提交。") }
         catch (_: Exception) { SubmitResult.Uncertain("服务器未返回可确认的提交结果。请先到网页核对，不要重复提交。") }
+        if (result !is SubmitResult.Uncertain) pendingKey?.let(store::remove)
+        return result
     }
 
     override suspend fun submitWithFiles(form: EditorForm, values: Map<String, String>, files: List<LocalUpload>): SubmitResult {
@@ -275,19 +291,17 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         if (sourceEffect !in listOf(SiteEffect.READ, SiteEffect.DOWNLOAD)) return@withLock SiteActionResult.Rejected("此表单来源包含操作参数，不能自动重读；请从功能首页重新进入")
         val fresh = if (sourceEffect == SiteEffect.DOWNLOAD) submission.form else {
             val refreshed = fetch(submission.form.sourceUrl)
+            if (refreshed.authStatus == AuthStatus.LOGIN_REQUIRED) return@withLock SiteActionResult.Response(refreshed)
+            if (!isSamePageList(submission.form.sourceUrl, refreshed.url) ||
+                (submission.form.sourceUrl.toHttpUrl().queryParameter("page") ?: "1") != (refreshed.url.toHttpUrl().queryParameter("page") ?: "1"))
+                return@withLock SiteActionResult.Rejected("表单来源页已变化，未提交，请重新打开")
             refreshed.nativePage?.forms?.firstOrNull { it.id == submission.form.id }
                 ?: return@withLock SiteActionResult.Rejected("表单已变化，请刷新后重试")
         }
-        require(fresh.fields.map { it.name to it.kind } == submission.form.fields.map { it.name to it.kind }) { "表单字段已变化，请重新填写" }
         val clicked = fresh.submits.firstOrNull { it.name == submission.submit.name && it.value == submission.submit.value }
             ?: return@withLock SiteActionResult.Rejected("提交选项已变化，请刷新")
-        val userValues = submission.values.drop(submission.form.hidden.size).filterNot { it.name == clicked.name }
-        val state = fresh.fields.associate { field ->
-            field.id to userValues.filter { it.name == field.name }.map { it.value }.let { values ->
-                if (field.options.isNotEmpty()) values.filter { value -> field.options.any { it.value == value } } else values
-            }
-        }
-        val values = buildSiteFormValues(fresh, state, clicked)
+        val values = try { revalidatedSiteValues(submission, fresh, clicked) }
+            catch (e: IllegalArgumentException) { return@withLock SiteActionResult.Rejected(e.message ?: "表单已变化，未提交") }
         val body = if (fresh.multipart || submission.files.isNotEmpty()) nativeMultipart(values, submission.files)
             else gbkFormValues(values).toRequestBody("application/x-www-form-urlencoded".toMediaType())
         if (fresh.method == "GET") {

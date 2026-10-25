@@ -58,20 +58,26 @@ class ForumHtmlParser(private val origin: String) {
         val menu = doc.select("#kf_information a[href]").mapNotNull { link(it) }
             .filterNot { it.url.toHttpUrl().queryParameter("action") == "quit" }
         val topics = when (path) {
-            "thread.php" -> doc.select(".threadtit1 a[href*='read.php?tid=']").mapNotNull { a ->
+            "thread.php" -> doc.select(".threadtit1 a[href*='read.php?']").filter { resolve(it.attr("href"), url)?.toHttpUrl()?.queryParameter("tid") != null }.mapNotNull { a ->
                 val row = a.closest("tr")
                 val category = a.parent()?.selectFirst("a[href*='type=']")?.text().orEmpty()
                 val author = row?.selectFirst("a[href*='profile.php?action=show']")?.text().orEmpty()
                 val stats = row?.selectFirst(".b_tit6")?.text().orEmpty()
                 link(a, category, listOf(author, stats).filter { it.isNotBlank() }.joinToString(" · "))
             }
-            "message.php" -> doc.select("a[href*='message.php?action=read']").mapNotNull { a ->
+            "message.php" -> contentRoot(doc).select("a[href*='message.php?']").filter { a ->
+                resolve(a.attr("href"), url)?.toHttpUrl()?.let { it.encodedPath == "/message.php" && it.queryParameter("action") in setOf("read", "readscout") } == true
+            }.mapNotNull { a ->
                 val cells = a.closest("tr")?.children().orEmpty()
                 link(a, "私信", cells.drop(2).take(3).joinToString(" · ") { it.text() }.take(120))
             }
-            "profile.php" -> doc.select("a[href*='read.php?tid=']").filterNot { it.closest(".rightdiv") != null }.mapNotNull { link(it, "收藏") }
+            "profile.php" -> if (url.toHttpUrl().queryParameter("action") == "favor")
+                contentRoot(doc).select("a[href*='read.php?']").filter { resolve(it.attr("href"), url)?.toHttpUrl()?.queryParameter("tid") != null }.mapNotNull { a ->
+                    val cells = a.closest("tr")?.select("> td").orEmpty()
+                    link(a, "收藏", cells.drop(1).take(2).joinToString(" · ") { it.text() })
+                } else emptyList()
             "search.php" -> listingLinks(doc, "搜索结果")
-            else -> {
+            "index.php", "" -> {
                 val main = doc.select(".dcol").filter { it.select("a[href*='read.php?tid=']").size > 20 }
                 if (main.isEmpty()) listingLinks(doc, "最新讨论")
                 else main.flatMapIndexed { index, col ->
@@ -81,13 +87,14 @@ class ForumHtmlParser(private val origin: String) {
                     }
                 }
             }
+            else -> emptyList()
         }.distinctBy { it.url.toHttpUrl().queryParameter("tid") ?: it.url }
         val posts = doc.select(".readtext[id^=pid]").mapNotNull { parsePost(it, url) }
-        val currentPage = url.toHttpUrl().queryParameter("page")?.toIntOrNull() ?: 0
+        val currentPage = url.toHttpUrl().queryParameter("page")?.toIntOrNull() ?: 1
         val pageLinks = doc.select("a[href]").mapNotNull { anchor ->
             val target = resolve(anchor.attr("href"), url) ?: return@mapNotNull null
             val targetUrl = target.toHttpUrl()
-            if (targetUrl.pathSegments.lastOrNull() != path) return@mapNotNull null
+            if (targetUrl.pathSegments.lastOrNull() != path || !isSamePageList(url, target)) return@mapNotNull null
             val number = targetUrl.queryParameter("page")?.toIntOrNull() ?: return@mapNotNull null
             target to number
         }.distinctBy { it.first }
@@ -118,7 +125,15 @@ class ForumHtmlParser(private val origin: String) {
             val target = resolve(a.attr("href"), url) ?: return@let null
             routes.classify(target, "收藏本帖").let { if (it.effect == SiteEffect.CHANGE) it.copy(title = "收藏本帖", explanation = "将把本帖加入站点的收藏夹，不会保存在本机。") else null }
         }
-        return PageData(url, title, authenticated, username, boards, topics, posts, menu, next, previous, compose, notice, status, feeds, native, logout, favorite)
+        val boardFilters = if (path == "thread.php") contentRoot(doc).select("a[href*='thread.php?']").mapNotNull { a ->
+            val target = resolve(a.attr("href"), url)?.toHttpUrl() ?: return@mapNotNull null
+            if (target.queryParameter("fid") != url.toHttpUrl().queryParameter("fid") ||
+                target.queryParameterNames.none { it in setOf("type", "digest", "orderway", "asc") } ||
+                routes.classify(target.toString()).effect != SiteEffect.READ) return@mapNotNull null
+            link(a)
+        }.distinctBy { it.url }.take(30) else emptyList()
+        return PageData(url, title, authenticated, username, boards, topics, posts, menu, next, previous, compose, notice, status, feeds, native, logout, favorite,
+            boardFilters = boardFilters)
     }
 
     private fun homeFeeds(doc: Document): List<HomeFeedSection> {
@@ -158,8 +173,11 @@ class ForumHtmlParser(private val origin: String) {
         }.distinctBy { it.id }.take(500).toList()
     }
 
+    private fun contentRoot(doc: Document): Element = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") } ?: doc.body()
+
     private fun listingLinks(doc: Document, group: String): List<SiteLink> =
-        doc.select("a[href*='read.php?tid=']").filterNot { it.closest(".rightdiv") != null }
+        contentRoot(doc).select("a[href*='read.php?']").filter { resolve(it.attr("href"), doc.baseUri())?.toHttpUrl()?.queryParameter("tid") != null }
+            .filterNot { it.closest(".rightdiv") != null }
             .mapNotNull { link(it, group) }
 
     private fun parsePost(post: Element, pageUrl: String): ForumPost? {
@@ -272,7 +290,7 @@ class ForumHtmlParser(private val origin: String) {
     fun loginFields(html: String, url: String): Pair<String, Map<String, String>> {
         val doc = document(html, url)
         val form = doc.select("form").firstOrNull { form -> controls(form).any { it.attr("name") == "pwuser" } && controls(form).any { it.attr("name") == "pwpwd" } }
-            ?: error("未找到标准登录表单，请打开原生登录选项核对")
+            ?: error("未找到登录表单，请打开更多登录选项核对")
         require(form.attr("method").equals("post", true)) { "登录表单协议已变化" }
         return (resolve(form.attr("action"), url) ?: error("已阻止跨域登录表单")) to formFields(form)
     }
@@ -280,7 +298,7 @@ class ForumHtmlParser(private val origin: String) {
     fun parseEditor(html: String, url: String): EditorForm {
         val doc = document(html, url)
         val form = doc.select("form").firstOrNull { form -> controls(form).any { it.tagName() == "textarea" && it.attr("name") == "atc_content" } }
-            ?: error("未找到标准编辑器，请通过本页原生表单核对权限与选项")
+            ?: error("暂时无法打开编辑器，请检查发帖权限或稍后重试")
         val fields = formFields(form).toMutableMap()
         // The legacy post template closes a form inside a table. HTML parsers
         // may foster-parent its trailing controls outside the form element.

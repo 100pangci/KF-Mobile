@@ -7,6 +7,7 @@ import kotlin.test.assertTrue
 import work.miaola.kf.ui.KfDestinationKind
 import work.miaola.kf.ui.KfDestinations
 import work.miaola.kf.ui.isTopLevel
+import work.miaola.kf.ui.KfSearchRoute
 
 class KfDestinationsTest {
     @Test fun urlRoutesMapToExplicitDestinations() {
@@ -19,8 +20,19 @@ class KfDestinationsTest {
         assertEquals(KfDestinationKind.MESSAGES, KfDestinations.fromUrl("message.php?action=receivebox"))
         assertEquals(KfDestinationKind.MESSAGE, KfDestinations.fromUrl("message.php?action=read&mid=1"))
         assertEquals(KfDestinationKind.PROFILE, KfDestinations.fromUrl("profile.php?action=show&uid=1"))
+        assertEquals(KfDestinationKind.LISTING, KfDestinations.fromUrl("profile.php?action=favor&page=2"))
+        assertEquals(KfDestinationKind.MESSAGES, KfDestinations.fromUrl("message.php?memo=action=write"))
         assertEquals(KfDestinationKind.LOGIN, KfDestinations.fromUrl("login.php"))
         assertEquals(KfDestinationKind.NATIVE, KfDestinations.fromUrl("kf_growup.php"))
+    }
+
+    @Test fun searchRouteEscapesArgumentsAndResultUrlsIndependently() {
+        assertEquals("search?q=%E7%BB%AF%E6%9C%88%20%26%3F%23%25&author=a%7Cb&url=", KfSearchRoute.create("绯月 &?#%", "a|b"))
+        assertEquals("search?q=&author=&url=search.php%3Fsearchid%3Dabc%26page%3D2", KfSearchRoute.create(resultUrl = "search.php?searchid=abc&page=2"))
+        assertTrue(KfDestinations.isSearchNavigation("search.php?searchid=abc&page=2"))
+        assertTrue(KfDestinations.isSearchNavigation("search.php?step=2&searchid=abc&page=2"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?step=2&keyword=x"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?searchid=abc&action=delete"))
     }
 
     @Test fun messageBoxLinksNeverAskForAWriteConfirmation() {
@@ -30,6 +42,8 @@ class KfDestinationsTest {
         assertTrue(KfDestinations.isReadOnlyMessage("message.php?action=write&touid=1"))
         assertFalse(KfDestinations.isReadOnlyMessage("message.php?action=del&delid[]=1"))
         assertFalse(KfDestinations.isReadOnlyMessage("message.php?action=sendbox&step=2"))
+        assertFalse(KfDestinations.isReadOnlyMessage("message.php?action=write&do=delete"))
+        assertFalse(KfDestinations.isReadOnlyMessage("message.php?action=read&action=del&mid=1"))
     }
 
     @Test fun onlyRootTabsKeepBottomNavigation() {
