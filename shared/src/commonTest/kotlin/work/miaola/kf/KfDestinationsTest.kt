@@ -24,6 +24,8 @@ class KfDestinationsTest {
         assertEquals(KfDestinationKind.MESSAGES, KfDestinations.fromUrl("message.php?memo=action=write"))
         assertEquals(KfDestinationKind.LOGIN, KfDestinations.fromUrl("login.php"))
         assertEquals(KfDestinationKind.NATIVE, KfDestinations.fromUrl("kf_growup.php"))
+        assertEquals(KfDestinationKind.GUGU, KfDestinations.fromUrl("fyg_sjcdwj.php?go=play&xl=2"))
+        assertFalse(KfDestinationKind.GUGU.isTopLevel)
     }
 
     @Test fun searchRouteEscapesArgumentsAndResultUrlsIndependently() {

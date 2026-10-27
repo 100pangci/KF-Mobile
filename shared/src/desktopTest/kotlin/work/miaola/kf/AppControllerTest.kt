@@ -66,6 +66,7 @@ class DemoService(override val origin: String) : ForumService {
                     level = "1", coefficient = "2", experience = "3", progress = 4,
                     claimed = dailyClaimed,
                     claimUrl = if (dailyClaimed) null else "$origin/kf_growup.php?ok=1&safeid=synthetic",
+                    claimStatus = if (dailyClaimed) StatusKind.COMPLETED else StatusKind.AVAILABLE,
                 )))
             url.contains("thread.php") -> home.copy(url = "$origin/thread.php?fid=1", title = "Galgame 综合讨论", composeUrl = "$origin/post.php?fid=1")
             else -> homeOverride ?: home
@@ -213,10 +214,11 @@ class AppControllerTest {
             listOf(SiteField("f", "delid[]", "第一封", SiteFieldKind.CHECKBOX, listOf("1"), listOf(FormOption("1", "第一封")))),
             listOf(SiteSubmit("执行", null, "")))
         c.requestSiteSubmit(form, mapOf("f" to listOf("1")), form.submits.single()); runCurrent()
-        assertNotNull(c.pendingSiteSubmission)
-        assertEquals(0, factory.services.getValue(c.origin).siteSubmissions)
-        c.confirmSiteAction(); runCurrent()
+        assertNotNull(c.pendingBatch)
         assertNull(c.pendingSiteSubmission)
+        assertEquals(0, factory.services.getValue(c.origin).siteSubmissions)
+        c.confirmBatch(); runCurrent()
+        assertNull(c.pendingBatch)
         assertEquals(1, factory.services.getValue(c.origin).siteSubmissions)
         c.close()
     }

@@ -122,7 +122,7 @@ private fun GrowthScreen(c: AppController, growth: NativeGrowth, native: NativeS
             item {
                 Button(
                     onClick = c::claimDailyReward,
-                    enabled = !c.dailyBusy && !c.dailySigned && !growth.claimed,
+                    enabled = !c.dailyBusy && !c.dailySigned && growth.claimStatus == StatusKind.AVAILABLE,
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                     shape = RoundedCornerShape(16.dp),
                 ) {
@@ -137,6 +137,18 @@ private fun GrowthScreen(c: AppController, growth: NativeGrowth, native: NativeS
                         fontWeight = FontWeight.Bold,
                     )
                 }
+                Text(
+                    when {
+                        growth.claimStatus == StatusKind.COMPLETED -> "状态：已完成（站点明确标记）"
+                        growth.claimStatus == StatusKind.AVAILABLE -> "状态：可领取（站点提供签到入口）"
+                        growth.claimStatus == StatusKind.WAITING -> "状态：等待处理"
+                        growth.claimStatus == StatusKind.EXPIRED -> "状态：已过期"
+                        growth.claimStatus == StatusKind.FAILED -> "状态：失败"
+                        else -> "状态：未知（站点未提供可判断的状态）"
+                    },
+                    Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             if (growth.colors.isNotEmpty()) item {
                 Text("成长颜色", style = MaterialTheme.typography.titleSmall)
@@ -477,7 +489,10 @@ internal fun UnsupportedBlock(items: List<String>) {
 @Composable
 internal fun NativeFormCard(c: AppController, form: SiteForm) {
     var expanded by remember(form) { mutableStateOf(form.fields.size <= 12) }
-    val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
+    val selectionRevision = if (form.fields.any { it.name == "delid[]" }) c.managementRevision else 0
+    val values = remember(form, selectionRevision) { mutableStateMapOf<String, List<String>>().apply {
+        form.fields.forEach { put(it.id, if (it.name == "delid[]") emptyList() else it.initial) }
+    } }
     Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))) {
         Column {
@@ -492,6 +507,7 @@ internal fun NativeFormCard(c: AppController, form: SiteForm) {
             if (expanded) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ManagementRecovery(c, form.sourceUrl)
                     if (form.fields.count { it.kind == SiteFieldKind.CHECKBOX } > 3) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Text("共 ${form.fields.count { it.kind == SiteFieldKind.CHECKBOX }} 项", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -503,7 +519,7 @@ internal fun NativeFormCard(c: AppController, form: SiteForm) {
                     form.fields.forEach { field -> NativeField(c, form, field, values[field.id].orEmpty()) { values[field.id] = it } }
                     if (form.id != "rpc:recommend") Text(if (form.warning == "提交会改变站点数据，请核对后确认。") "请核对填写内容后提交。" else form.warning, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     form.submits.forEachIndexed { index, submit ->
-                        val enabled = !c.siteBusy && !c.busy
+                        val enabled = !c.siteBusy && !c.busy && c.managementRecoveryFor(form.sourceUrl) == null
                         if (index == 0) Button(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = enabled, modifier = Modifier.fillMaxWidth().height(46.dp)) {
                             Text(submit.label)
                         } else OutlinedButton(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = enabled, modifier = Modifier.fillMaxWidth()) {

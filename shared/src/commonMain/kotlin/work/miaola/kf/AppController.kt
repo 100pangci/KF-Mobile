@@ -8,6 +8,7 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Semaphore
@@ -40,6 +41,10 @@ class AppController(
     var draftRecipient by mutableStateOf("")
     var draftCategory by mutableStateOf("")
     var draftKeywords by mutableStateOf("")
+    var draftAttachmentNotice by mutableStateOf<String?>(null); private set
+    var draftRestored by mutableStateOf(false); private set
+    var pendingMentionName by mutableStateOf<String?>(null); private set
+    var pendingMessageConfirm by mutableStateOf(false); private set
     var submitUncertain by mutableStateOf(false); private set
     var confirmDiscard by mutableStateOf(false)
     var pendingPurchase by mutableStateOf<PurchaseOffer?>(null); private set
@@ -56,6 +61,18 @@ class AppController(
     var pendingSiteSubmission by mutableStateOf<SiteSubmission?>(null); private set
     var siteBusy by mutableStateOf(false); private set
     var managementRevision by mutableStateOf(0); private set
+    var managementRecoveries by mutableStateOf<Set<String>>(emptySet()); private set
+    var pendingBatch by mutableStateOf<List<BatchPageRequest>?>(null); private set
+    var batchBusy by mutableStateOf(false); private set
+    var batchResult by mutableStateOf<BatchTransactionResult?>(null); private set
+    var pendingReward by mutableStateOf<RewardAction?>(null); private set
+    var rewardBusy by mutableStateOf(false); private set
+    var pendingAvatar by mutableStateOf<LocalUpload?>(null); private set
+    var avatarPickerRequested by mutableStateOf(false); private set
+    var avatarBusy by mutableStateOf(false); private set
+    var gugu by mutableStateOf<GuguSnapshot?>(null); private set
+    var guguBusy by mutableStateOf(false); private set
+    var guguError by mutableStateOf<String?>(null); private set
     var filePickerRequest by mutableStateOf<FilePickerRequest?>(null); private set
     var downloadRequest by mutableStateOf<NativeDownloadRequest?>(null); private set
     var editorFiles by mutableStateOf<List<LocalUpload>>(emptyList()); private set
@@ -72,6 +89,12 @@ class AppController(
     var lastSearchKeyword by mutableStateOf(""); private set
     var lastSearchAuthor by mutableStateOf(""); private set
     private var service = factory.create(origin)
+    private var recovery = RecoveryStore(store, origin)
+    private var recoveryState = recovery.loadState() ?: RecoveryState(origin = origin)
+    private var recoveryJob: Job? = null
+    private var draftJob: Job? = null
+    private var restoreJob: Job? = null
+    private var batchJob: Job? = null
     private var requestJob: Job? = null
     private var requestVersion = 0
     private var loadingUrl: String? = null
@@ -100,6 +123,7 @@ class AppController(
     fun timelineFor(first: PageData): PageTimeline {
         timelines[first.url]?.let { return it }
         val state = PageTimeline(first)
+        if (managementRecoveryFor(first.url) != null) state.invalidateManagement()
         timelines[first.url] = state
         // Bound destination retention, not the number of pages in the active
         // reader. Appending 40 pages must not evict that reader's first page.
@@ -120,6 +144,7 @@ class AppController(
 
     fun loadNext(first: PageData, retry: Boolean = false) {
         if (purchaseBusy || siteBusy || pendingPurchase != null) return
+        if (managementRecoveryFor(first.url) != null) return
         val state = timelineFor(first)
         val next = state.next ?: return
         if (!state.canLoad(next) || (state.failure != null && !retry)) return
@@ -147,6 +172,7 @@ class AppController(
                     refreshPurchaseState(result)
                     rememberCachedPage(result, next)
                     state.append(result, next)
+                    rememberTimeline(state)
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (origin == expectedOrigin && requestId == state.requestId) state.failure = friendlyError(e) }
@@ -155,6 +181,7 @@ class AppController(
     }
 
     fun refreshTimeline(first: PageData, search: Pair<String, String>? = null) {
+        managementRecoveryFor(first.url)?.let { recoverManagement(it); return }
         if (!safeTimelineUrl(first.url)) { toast = "请重新打开页面后刷新"; return }
         val state = timelineFor(first)
         if (state.refreshing || purchaseBusy || siteBusy) return
@@ -179,6 +206,7 @@ class AppController(
                     .map { it.key }.forEach { pageCache[it] = result }
                 timelines[result.url] = state
                 state.reset(result)
+                rememberTimeline(state)
                 if (home?.url == first.url) home = result
                 if (siteFavorites?.url == first.url) siteFavorites = result
                 if (page?.url == first.url) page = result
@@ -210,9 +238,18 @@ class AppController(
             draftCategory != form.fields["p_type"].orEmpty() ||
             draftKeywords != form.fields["diy_guanjianci"].orEmpty() || editorFiles.isNotEmpty()
     }
-    val canBack get() = gallery != null || showSiteTools || pendingSiteDestination != null || pendingSiteSubmission != null || loadingEditor || pendingPurchase != null || editor != null || showSettings || showLogin || backStack.isNotEmpty()
+    val canBack get() = gallery != null || showSiteTools || pendingSiteDestination != null || pendingSiteSubmission != null || pendingBatch != null || pendingReward != null || pendingAvatar != null || pendingMessageConfirm || loadingEditor || pendingPurchase != null || editor != null || showSettings || showLogin || backStack.isNotEmpty()
 
-    init { store.put("selected_origin", origin); refreshCatalog(); load("index.php", push = false) }
+    init {
+        store.put("selected_origin", origin)
+        managementRecoveries = recoveryState.pendingManagement.toSet()
+        recovery.loadPendingBatch()?.let { pending ->
+            // A process death during a multi-page write leaves the receipt
+            // unknown. Never replay it; force a read-only reconciliation.
+            managementRecoveries = managementRecoveries + pending.sourcePages
+        }
+        refreshCatalog(); load("index.php", push = false)
+    }
 
     private fun work(editorRequest: Boolean = false, task: suspend (() -> Boolean) -> Unit) {
         val version = ++requestVersion
@@ -241,7 +278,7 @@ class AppController(
         val sourcePath = (requestedUrl ?: result.url).substringBefore('?').substringAfterLast('/')
         if (!allowLoginWall && result.authStatus == AuthStatus.LOGIN_REQUIRED && sourcePath != "login.php") return
         pageCache[result.url] = result
-        timelines.values.distinct().forEach { it.updatePage(result) }
+        timelines.values.distinct().filterNot { it.managementStale }.forEach { it.updatePage(result) }
         if (requestedUrl != null && requestedUrl != result.url) pageCache[requestedUrl] = result
         while (pageCache.size > 32) {
             val current = page?.url
@@ -264,8 +301,17 @@ class AppController(
      */
     fun ensurePage(url: String, force: Boolean = false) {
         if (purchaseBusy || siteBusy) return
+        managementRecoveryFor(url)?.let { if (force || pageFor(url) == null) recoverManagement(it); return }
         if (!force && pageFor(url) != null) return
         if (!force && busy && loadingUrl == url) return
+        // A restored reader may point at page 4. Rebuild from its saved root
+        // so floor order and the saved anchor remain meaningful.
+        val snapshot = recoveredTimelineFor(url)
+        if (!force && snapshot != null && pageNumber(url) > 1 && pageFor(snapshot.rootUrl) == null &&
+            isSamePageList(snapshot.rootUrl, url)) {
+            load(snapshot.rootUrl, push = false)
+            return
+        }
         load(url, push = false)
     }
 
@@ -288,6 +334,9 @@ class AppController(
         error = null
     }
 
+    private fun pageNumber(url: String): Int =
+        Regex("[?&]page=([0-9]+)(?:&|$)").find(url.substringBefore('#'))?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
     fun load(url: String = page?.url ?: "index.php", push: Boolean = true) {
         if (purchaseBusy || siteBusy) return
         val route = service.destination(url)
@@ -301,6 +350,10 @@ class AppController(
             page = result
             rememberMailbox(result)
             rememberCachedPage(result, url)
+            val state = timelineFor(result)
+            if (state.first.url != result.url) state.reset(result)
+            restoreContinuation(result)
+            rememberTimeline(state)
             showSiteTools = false
             if (url.substringBefore('?').substringAfterLast('/') == "index.php" && result.authStatus != AuthStatus.UNKNOWN) home = result
             when (result.authStatus) {
@@ -458,10 +511,20 @@ class AppController(
                     dailySigned = false
                     return@launch
                 }
-                val claimed = page.nativePage?.growth?.claimed ?: return@launch
-                dailySigned = claimed
-                if (claimed) store.put("daily_signed@$origin", localDayKey())
-                else store.remove("daily_signed@$origin")
+                val growth = page.nativePage?.growth ?: return@launch
+                when (growth.claimStatus) {
+                    StatusKind.COMPLETED -> {
+                        dailySigned = true
+                        store.put("daily_signed@$origin", localDayKey())
+                    }
+                    StatusKind.AVAILABLE -> {
+                        dailySigned = false
+                        store.remove("daily_signed@$origin")
+                    }
+                    // Unknown / waiting / failed are not evidence that the
+                    // daily claim is available or already completed.
+                    StatusKind.WAITING, StatusKind.EXPIRED, StatusKind.FAILED, StatusKind.UNKNOWN -> Unit
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -476,7 +539,8 @@ class AppController(
      * account balance, and never navigate to the color-customisation page.
      */
     fun claimDailyReward() {
-        if (dailyBusy || busy || siteBusy || purchaseBusy) return
+        if (dailyBusy || busy || siteBusy || purchaseBusy || batchBusy || rewardBusy || avatarBusy ||
+            pendingSiteDestination != null || pendingSiteSubmission != null || pendingBatch != null || pendingReward != null || pendingAvatar != null) return
         if (dailySigned) {
             toast = "今天已经签过了，明天再来"
             return
@@ -510,14 +574,18 @@ class AppController(
                 }
                 val growth = page.nativePage?.growth
                 var notice = page.notice
-                var claimed = growth?.claimed == true
+                var claimed = growth?.claimStatus == StatusKind.COMPLETED
+                var claimReceiptUncertain = false
                 val claimUrl = growth?.claimUrl
                 if (!claimed && claimUrl != null) {
                     val destination = client.destination(claimUrl)
                     when (destination.effect) {
                         SiteEffect.READ -> client.fetch(destination.url)
                         SiteEffect.CHANGE -> when (val result = client.executeSite(destination)) {
-                            is SiteActionResult.Response -> notice = result.page.notice.ifBlank { notice }
+                            is SiteActionResult.Response -> {
+                                notice = result.page.notice.ifBlank { notice }
+                                claimReceiptUncertain = result.uncertainReceipt != null
+                            }
                             is SiteActionResult.Rejected -> { error = result.message; return@launch }
                             is SiteActionResult.Uncertain -> { error = result.message; return@launch }
                         }
@@ -532,7 +600,10 @@ class AppController(
                     }
                     val values = buildSiteFormValues(form, form.fields.associate { it.id to it.initial }, submit)
                     when (val result = client.submitSite(SiteSubmission(form, values, emptyList(), submit))) {
-                        is SiteActionResult.Response -> notice = result.page.notice.ifBlank { notice }
+                            is SiteActionResult.Response -> {
+                                notice = result.page.notice.ifBlank { notice }
+                                claimReceiptUncertain = result.uncertainReceipt != null
+                            }
                         is SiteActionResult.Rejected -> { error = result.message; return@launch }
                         is SiteActionResult.Uncertain -> { error = result.message; return@launch }
                     }
@@ -542,7 +613,8 @@ class AppController(
                     val statusPage = try { client.fetch("kf_growup.php") } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
                     if (statusPage != null) {
                         notice = statusPage.notice.ifBlank { notice }
-                        claimed = statusPage.nativePage?.growth?.claimed == true
+                        claimed = statusPage.nativePage?.growth?.claimStatus == StatusKind.COMPLETED
+                        if (statusPage.nativePage?.growth?.claimStatus == StatusKind.AVAILABLE) claimReceiptUncertain = true
                     }
                 }
                 if (origin != expectedOrigin || !authenticated) return@launch
@@ -550,7 +622,11 @@ class AppController(
                     dailySigned = true
                     store.put("daily_signed@$origin", localDayKey())
                 } else {
-                    error = "未获取到签到状态，请稍后重试"
+                    error = if (claimReceiptUncertain) {
+                        "服务器可能已执行签到，但当前状态无法确认。请刷新签到页面核对，不要重复领取。"
+                    } else {
+                        "站点没有提供可确认的签到状态；请刷新状态后再决定是否操作。"
+                    }
                     return@launch
                 }
                 val fresh = client.fetch("index.php")
@@ -593,7 +669,7 @@ class AppController(
         ?: 0L
 
     fun favoriteThread(destination: SiteDestination?) {
-        if (destination == null || purchaseBusy || siteBusy || dailyBusy) return
+        if (destination == null || purchaseBusy || siteBusy || dailyBusy || batchBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null || pendingPurchase != null) return
         if (SiteActionRisk.needsConfirmation(destination)) { pendingSiteDestination = destination; return }
         if (!authenticated) {
             loginReturnUrl = page?.url?.let(::loginDestination)
@@ -606,6 +682,15 @@ class AppController(
         val expectedOrigin = origin
         val client = service
         val threadUrl = page?.takeIf { it.posts.isNotEmpty() || it.url.contains("read.php") }?.url
+        val currentAction = runCatching {
+            destination.url.substringAfter('?', "").substringBefore('#').split('&')
+                .firstOrNull { it.substringBefore('=') == "action" }?.substringAfter('=')
+        }.getOrNull()
+        val expectedAction = when (currentAction) {
+            "favor" -> "unfavor"
+            "unfavor" -> "favor"
+            else -> null
+        }
         siteJob = scope.launch {
             try {
                 when (val result = client.executeSite(destination)) {
@@ -615,9 +700,10 @@ class AppController(
                             showLogin = true
                             error = "登录状态已失效，请重新登录"
                         } else {
-                            toast = result.page.notice.ifBlank { SiteActionRisk.successMessage(destination) }
                             // Re-read the reader so its favorite entry matches the
-                            // site immediately (the site swaps add/remove links).
+                            // site immediately. HTTP/page return alone is not a
+                            // business receipt; require the opposite action link.
+                            var confirmed = false
                             if (threadUrl != null && page?.url == threadUrl) {
                                 val refreshed = try {
                                     client.fetch(threadUrl)
@@ -630,7 +716,21 @@ class AppController(
                                     refreshPurchaseState(refreshed)
                                     page = refreshed
                                     rememberCachedPage(refreshed, threadUrl)
+                                    val actions = listOfNotNull(refreshed.favorite) +
+                                        refreshed.nativePage?.links.orEmpty() +
+                                        refreshed.posts.flatMap { it.actions }
+                                    confirmed = expectedAction != null && actions.any { action ->
+                                        action.url.contains("kf_tidfavor.php") &&
+                                            action.url.substringAfter('?', "").substringBefore('#').split('&')
+                                                .any { it == "action=$expectedAction" }
+                                    }
                                 }
+                            }
+                            if (confirmed) {
+                                toast = result.page.notice.ifBlank { SiteActionRisk.successMessage(destination) }
+                            } else {
+                                error = result.uncertainReceipt
+                                    ?: "服务器已返回页面，但收藏状态未能核对。请刷新主题后再决定是否重试。"
                             }
                         }
                     }
@@ -640,7 +740,7 @@ class AppController(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (origin == expectedOrigin) error = friendlyError(e)
+                if (origin == expectedOrigin) error = "收藏请求结果无法确认，请刷新主题核对，不要自动重试。"
             } finally {
                 siteBusy = false
             }
@@ -729,7 +829,7 @@ class AppController(
     }
 
     fun requestPurchase(offer: PurchaseOffer) {
-        if (purchaseBusy || busy) return
+        if (purchaseBusy || busy || siteBusy || batchBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null) return
         if (!authenticated) { loginReturnUrl = page?.url?.let(::loginDestination); showLogin = true; return }
         if (visiblePosts().flatMap { it.purchases }.none { it == offer }) return
         if (offer.id in uncertainPurchases) { error = "购买结果待确认，请先刷新"; return }
@@ -749,7 +849,7 @@ class AppController(
 
     fun confirmPurchase() {
         val offer = pendingPurchase ?: return
-        if (purchaseBusy || busy) return
+        if (purchaseBusy || busy || siteBusy || batchBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null) return
         purchaseBusy = true; error = null
         purchaseJob = scope.launch {
             try {
@@ -813,8 +913,162 @@ class AppController(
         }
     }
 
+    // ---- Process-recovery state (reconstructable only) -------------------
+
+    fun rememberDestination(kind: String, url: String? = null, query: String = "", author: String = "") {
+        val next = DestinationRecovery(kind, url.orEmpty().take(2_048), query.take(200), author.take(200))
+        if (recoveryState.destination != next) {
+            recoveryState = recoveryState.copy(destination = next)
+            runCatching { recovery.saveState(recoveryState) }
+        }
+    }
+
+    fun recoveredDestination(): DestinationRecovery? = recoveryState.destination.takeIf { it.kind.isNotBlank() }
+
+    fun anchorFor(rootUrl: String): TimelineRecovery? = recoveryState.timelines.entries
+        .firstOrNull { isSamePageList(it.key, rootUrl) || isSamePageList(it.value.rootUrl, rootUrl) }?.value
+
+    fun rememberAnchor(rootUrl: String, index: Int, offset: Int, key: String = "") {
+        if (rootUrl.isBlank()) return
+        val previous = recoveryState.timelines[rootUrl]
+        val value = TimelineRecovery(rootUrl, previous?.loadedPageUrls.orEmpty(), index.coerceAtLeast(0),
+            offset, key.take(160), currentEpochMillis())
+        if (previous?.anchorIndex == value.anchorIndex && previous.anchorOffset == value.anchorOffset &&
+            previous.anchorKey == value.anchorKey) return
+        recoveryState = recoveryState.copy(timelines = recoveryState.timelines + (rootUrl to value))
+        scheduleRecoveryPersist()
+    }
+
+    private fun rememberTimeline(state: PageTimeline) {
+        val root = state.first.url
+        val pages = state.loadedPageUrls.distinct().take(RecoveryStore.MAX_RESTORED_PAGES)
+        val previous = recoveryState.timelines[root]
+        recoveryState = recoveryState.copy(timelines = recoveryState.timelines + (root to TimelineRecovery(
+            rootUrl = root,
+            loadedPageUrls = pages,
+            anchorIndex = previous?.anchorIndex ?: 0,
+            anchorOffset = previous?.anchorOffset ?: 0,
+            anchorKey = previous?.anchorKey.orEmpty(),
+            updatedAt = currentEpochMillis(),
+        )))
+        scheduleRecoveryPersist()
+    }
+
+    private fun scheduleRecoveryPersist() {
+        recoveryJob?.cancel()
+        recoveryJob = scope.launch {
+            delay(500)
+            runCatching { recovery.saveState(recoveryState) }
+        }
+    }
+
+    private fun recoveredTimelineFor(url: String): TimelineRecovery? = recoveryState.timelines.entries
+        .firstOrNull { isSamePageList(it.key, url) || isSamePageList(it.value.rootUrl, url) }?.value
+
+    private fun restoreContinuation(first: PageData) {
+        val snapshot = recoveredTimelineFor(first.url) ?: return
+        if (snapshot.loadedPageUrls.size <= 1) return
+        val state = timelineFor(first)
+        if (state.loadedPageUrls.size > 1 || state.loading || state.refreshing) return
+        val expected = origin
+        val client = service
+        val pages = snapshot.loadedPageUrls.drop(1)
+            .filter { candidate -> isSamePageList(snapshot.rootUrl, candidate) }
+            .take(RecoveryStore.MAX_RESTORED_PAGES - 1)
+        if (pages.isEmpty()) return
+        restoreJob?.cancel()
+        restoreJob = scope.launch {
+            var previous = first
+            for (candidate in pages) {
+                if (origin != expected || page?.url?.let { !isSamePageList(it, first.url) } == true) return@launch
+                val cached = pageFor(candidate)
+                if (cached != null) { previous = cached; continue }
+                val result = try { client.fetch(candidate) } catch (e: CancellationException) { throw e
+                } catch (_: Exception) { break }
+                if (origin != expected || handleTimelineLogin(result, snapshot.rootUrl)) return@launch
+                if (!isSamePageList(first.url, result.url) || !isPageContinuation(previous.url, result.url)) break
+                refreshPurchaseState(result)
+                rememberCachedPage(result, candidate)
+                state.append(result, candidate)
+                previous = result
+            }
+            rememberTimeline(state)
+        }
+    }
+
+    fun updateDraftTitle(value: String) { draftTitle = value; scheduleDraftSave() }
+    fun updateDraftContent(value: String) { draftContent = value; scheduleDraftSave() }
+    fun updateDraftRecipient(value: String) { draftRecipient = value; scheduleDraftSave() }
+    fun updateDraftCategory(value: String) { draftCategory = value; scheduleDraftSave() }
+    fun updateDraftKeywords(value: String) { draftKeywords = value; scheduleDraftSave() }
+    fun markDraftChanged() = scheduleDraftSave()
+
+    private fun scheduleDraftSave() {
+        val form = editor ?: return
+        draftJob?.cancel()
+        draftJob = scope.launch {
+            delay(350)
+            recovery.saveDraft(EditorDraft(
+                sourceUrl = form.sourceUrl,
+                title = draftTitle,
+                body = draftContent,
+                recipient = draftRecipient,
+                category = draftCategory,
+                keywords = draftKeywords,
+                attachments = editorFiles.map { DraftAttachmentMeta(it.name.take(160), it.mimeType.take(80), it.size, it.slot) },
+                updatedAt = currentEpochMillis(),
+            ))
+        }
+    }
+
+    fun flushDraft() {
+        draftJob?.cancel()
+        val form = editor ?: return
+        runCatching {
+            recovery.saveDraft(EditorDraft(
+                sourceUrl = form.sourceUrl,
+                title = draftTitle,
+                body = draftContent,
+                recipient = draftRecipient,
+                category = draftCategory,
+                keywords = draftKeywords,
+                attachments = editorFiles.map { DraftAttachmentMeta(it.name.take(160), it.mimeType.take(80), it.size, it.slot) },
+                updatedAt = currentEpochMillis(),
+            ))
+        }
+    }
+
+    fun flushRecovery() {
+        recoveryJob?.cancel()
+        runCatching { recovery.saveState(recoveryState) }
+    }
+
+    fun openEditorWithMention(url: String, displayName: String) {
+        if (displayName.isBlank()) { openEditor(url); return }
+        pendingMentionName = displayName.trim().take(32)
+        openEditor(url)
+    }
+
+    fun requestAvatarPicker() {
+        if (!busy && !siteBusy && !avatarBusy && !purchaseBusy && !batchBusy && !rewardBusy &&
+            pendingSiteDestination == null && pendingSiteSubmission == null && pendingBatch == null && pendingReward == null && pendingPurchase == null) {
+            avatarPickerRequested = true
+        }
+    }
+
+    fun consumeAvatarPickerRequest() { avatarPickerRequested = false }
+
+    fun receiveAvatar(file: LocalUpload?, failure: String? = null) {
+        avatarPickerRequested = false
+        failure?.let { error = it; pendingAvatar = null; return }
+        if (file == null) return
+        pendingAvatar = file
+    }
+
+    fun cancelAvatarUpload() { if (!avatarBusy) { pendingAvatar = null; avatarPickerRequested = false } }
+
     fun openEditor(url: String) {
-        if (busy || purchaseBusy) return
+        if (busy || purchaseBusy || siteBusy || batchBusy || rewardBusy || avatarBusy) return
         if (resolve(url).effect != SiteEffect.READ) { toast = "请从发帖或回复入口打开编辑器"; return }
         if (!authenticated) { loginReturnUrl = page?.url?.let(::loginDestination); showLogin = true; return }
         work(editorRequest = true) {
@@ -824,17 +1078,49 @@ class AppController(
             editorFiles = emptyList()
             nextUploadSlot = 1
             showEmoticonPicker = false
-            draftTitle = form.fields[form.titleField].orEmpty()
-            draftContent = form.fields[form.contentField].orEmpty()
-            draftRecipient = form.fields[form.recipientField].orEmpty()
-            draftCategory = form.fields["p_type"].orEmpty()
-            draftKeywords = form.fields["diy_guanjianci"].orEmpty()
+            val saved = recovery.loadDraft(form.sourceUrl) ?: recovery.loadDraft(url)
+            if (saved != null && saved.sourceUrl != form.sourceUrl) {
+                recovery.saveDraft(saved.copy(sourceUrl = form.sourceUrl))
+                recovery.removeDraft(saved.sourceUrl)
+            }
+            draftAttachmentNotice = null
+            draftRestored = saved != null
+            draftTitle = saved?.title ?: form.fields[form.titleField].orEmpty()
+            draftContent = saved?.body ?: form.fields[form.contentField].orEmpty()
+            draftRecipient = saved?.recipient ?: form.fields[form.recipientField].orEmpty()
+            draftCategory = saved?.category ?: form.fields["p_type"].orEmpty()
+            draftKeywords = saved?.keywords ?: form.fields["diy_guanjianci"].orEmpty()
+            if (saved != null && saved.attachments.isNotEmpty()) {
+                val names = saved.attachments.take(3).joinToString("、") { it.name }
+                draftAttachmentNotice = "有 ${saved.attachments.size} 个附件需要重新选择（$names${if (saved.attachments.size > 3) " 等" else ""}）；原附件内容不会从上次会话恢复。"
+            }
+            pendingMentionName?.let { name ->
+                pendingMentionName = null
+                if (!draftContent.contains("@$name")) draftContent = "@$name " + draftContent
+                if ("diy_guanjianci" in form.fields) draftKeywords = mergeMentionKeywords(draftKeywords, draftContent)
+                scheduleDraftSave()
+            }
             submitUncertain = false
         }
     }
 
+    fun requestEditorSubmit() {
+        val form = editor ?: return
+        if (busy || siteBusy || purchaseBusy || batchBusy || rewardBusy || avatarBusy) return
+        if (form.recipientField != null && draftRecipient.isNotBlank() && !submitUncertain) pendingMessageConfirm = true else submit()
+    }
+
+    fun confirmMessageSend() {
+        if (busy || siteBusy || purchaseBusy || batchBusy || rewardBusy || avatarBusy) return
+        pendingMessageConfirm = false
+        submit()
+    }
+
+    fun dismissMessageConfirm() { pendingMessageConfirm = false }
+
     fun submit() {
-        if (busy) return
+        if (busy || siteBusy || purchaseBusy || batchBusy || rewardBusy || avatarBusy ||
+            pendingBatch != null || pendingReward != null || pendingAvatar != null || pendingSiteDestination != null || pendingSiteSubmission != null) return
         val form = editor ?: return
         if (submitUncertain) { error = "提交结果待确认，请先核对"; return }
         work {
@@ -846,10 +1132,11 @@ class AppController(
             val values = mutableMapOf(form.titleField to draftTitle, form.contentField to draftContent)
             if (form.categories.isNotEmpty()) values["p_type"] = draftCategory
             form.recipientField?.let { values[it] = draftRecipient }
-            if ("diy_guanjianci" in form.fields) values["diy_guanjianci"] = draftKeywords
+            if ("diy_guanjianci" in form.fields) values["diy_guanjianci"] = mergeMentionKeywords(draftKeywords, draftContent)
             when (val result = service.submitWithFiles(form, values, editorFiles)) {
                 is SubmitResult.Success -> {
                     if (!it()) return@work
+                    recovery.removeDraft(form.sourceUrl)
                     editor = null; editorFiles = emptyList(); draftContent = ""; draftTitle = ""; toast = result.message
                     val submitted = service.fetch(result.url ?: page?.url ?: "index.php")
                     if (!it()) return@work
@@ -862,14 +1149,21 @@ class AppController(
     }
 
     fun dismissEditor() {
+        editor?.let { recovery.removeDraft(it.sourceUrl) }
+        draftJob?.cancel()
         editor = null; error = null; showEmoticonPicker = false
         draftTitle = ""; draftContent = ""; draftRecipient = ""; draftCategory = ""; draftKeywords = ""
+        draftAttachmentNotice = null; draftRestored = false; pendingMentionName = null
         editorFiles = emptyList()
     }
     fun requestBack() {
         if (purchaseBusy || siteBusy) return
         if (editor != null && busy && !loadingEditor) return
         if (gallery != null) { gallery = null; return }
+        if (pendingMessageConfirm) { dismissMessageConfirm(); return }
+        if (pendingBatch != null) { dismissBatch(); return }
+        if (pendingReward != null) { dismissReward(); return }
+        if (pendingAvatar != null) { cancelAvatarUpload(); return }
         if (pendingSiteSubmission != null || pendingSiteDestination != null) { dismissSiteAction(); return }
         if (showSiteTools) { showSiteTools = false; return }
         if (showSettings || showLogin) { back(); return }
@@ -892,19 +1186,24 @@ class AppController(
     }
 
     fun switchDomain(value: String) {
-        if (purchaseBusy || siteBusy) return
+        if (purchaseBusy || siteBusy || batchBusy || rewardBusy || avatarBusy) return
         val normalized = try { normalizeOrigin(value) } catch (e: Exception) { error = e.message; return }
         if (origin == normalized) return
         cancelRequest(); service.close(); editor = null; draftContent = ""; draftTitle = ""; draftRecipient = ""
+        draftJob?.cancel(); recoveryJob?.cancel(); restoreJob?.cancel(); batchJob?.cancel()
+        draftCategory = ""; draftKeywords = ""; draftAttachmentNotice = null; draftRestored = false
+        pendingMentionName = null; pendingMessageConfirm = false
         avatarJob?.cancel(); accountAvatar = null; accountProfile = null
         profileAvatars.clear(); profileAvatarLoading.clear()
-        draftCategory = ""; draftKeywords = ""
         pendingPurchase = null; uncertainPurchases = emptySet()
         showEmoticonPicker = false; sessionNotice = null
         loginReturnUrl = null
         clearFavorites()
         clearNativeTransientState()
         origin = normalized; store.put("selected_origin", origin)
+        recovery = RecoveryStore(store, origin)
+        recoveryState = recovery.loadState() ?: RecoveryState(origin = origin)
+        managementRecoveries = recoveryState.pendingManagement.toSet()
         dailySigned = store.get("daily_signed@$origin") == localDayKey()
         pageCache.clear()
         clearTimelines()
@@ -952,8 +1251,21 @@ class AppController(
         }
     }
     fun requestSiteSubmit(form: SiteForm, state: Map<String, List<String>>, submit: SiteSubmit) {
-        if (busy || siteBusy || purchaseBusy || dailyBusy) return
+        if (busy || siteBusy || purchaseBusy || dailyBusy || batchBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null) return
+        if (managementRecoveryFor(form.sourceUrl) != null) { error = "请先重新加载并核对列表，再选择项目"; return }
         try {
+            val selectedBulkValues = form.fields.filter { it.name == "delid[]" }
+                .flatMap { field -> field.options.filter { option -> option.value in state[field.id].orEmpty() } }
+                .map { it.value }.toSet()
+            if (selectedBulkValues.isNotEmpty()) {
+                val built = buildBatchPageRequest(form, selectedBulkValues, state)
+                if (built == null) { error = "所选项目无法安全核对，未提交"; return }
+                val values = buildSiteFormValues(form, state, submit)
+                val operation = values.lastOrNull { it.name in setOf("job", "action") }?.value
+                requestBatchSiteSubmit(listOf(built.copy(values = values, submit = submit,
+                    verifyAbsent = operation !in setOf("change", "move", "unread"))))
+                return
+            }
             val values = buildSiteFormValues(form, state, submit)
             val files = form.fields.filter { it.kind == SiteFieldKind.FILE }.flatMap { field ->
                 formFiles["${form.id}@${field.id}"].orEmpty().map { FilePart(field.name, it) }
@@ -970,11 +1282,12 @@ class AppController(
         val form = pendingSiteSubmission
         val link = pendingSiteDestination
         if (form == null && link == null) return
+        if (batchBusy || rewardBusy || avatarBusy || purchaseBusy || dailyBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null || pendingPurchase != null) return
         startSiteAction(form, link)
     }
 
     private fun startSiteAction(form: SiteSubmission?, link: SiteDestination?) {
-        if (siteBusy || purchaseBusy || dailyBusy) return
+        if (siteBusy || purchaseBusy || dailyBusy || batchBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingReward != null || pendingAvatar != null || pendingPurchase != null) return
         cancelRequest()
         if (link?.effect == SiteEffect.EXTERNAL) { pendingSiteDestination = null; browser(origin, link.url); return }
         if (link?.effect == SiteEffect.DOWNLOAD) {
@@ -1004,19 +1317,52 @@ class AppController(
             messageFlow -> messageSource
             else -> null
         }
+        if (managedReturn != null && managementRecoveryFor(managedReturn) != null) {
+            pendingSiteSubmission = null; pendingSiteDestination = null; siteBusy = false
+            error = "请先重新加载并核对列表，再选择项目"
+            return
+        }
+        val managedRecoveryStore = recovery
+        if (managedReturn != null) {
+            managedRecoveryStore.savePendingBatch(PendingBatch(
+                sourcePages = listOf(managedReturn),
+                itemIds = form?.values?.filter { it.name == "delid[]" }?.map { "$managedReturn#${it.value}" }.orEmpty(),
+                createdAt = currentEpochMillis(),
+            ))
+        }
+        // Stop old appends before the write; even a cancellation-ignoring
+        // transport must not append a pre-write snapshot after the response.
+        if (managedReturn != null) timelines.values.distinct().filter { isSamePageList(it.first.url, managedReturn) }.forEach { state ->
+            state.requestId++; state.loading = false; state.refreshing = false
+        }
         siteJob = scope.launch {
             try {
                 val response = if (form != null) service.submitSite(form) else service.executeSite(link!!)
+                if (managedReturn != null && response !is SiteActionResult.Rejected) invalidateManagement(managedReturn)
                 val result = if (managedReturn != null && response is SiteActionResult.Response && response.page.authStatus != AuthStatus.LOGIN_REQUIRED) {
                     // Read back the source list, not a legacy receipt/action URL.
                     val fresh = try { service.fetch(managedReturn) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-                    if (fresh != null) SiteActionResult.Response(fresh, response.uncertainReceipt) else response
+                    if (fresh != null && fresh.authStatus == AuthStatus.LOGIN_REQUIRED) SiteActionResult.Response(fresh)
+                    else if (fresh != null && validManagementReadback(managedReturn, fresh))
+                        SiteActionResult.Response(fresh, response.uncertainReceipt)
+                    else {
+                        error = "操作已返回，但列表未能重新加载；请先核对，勿重复提交"
+                        return@launch
+                    }
                 } else response
                 when (result) {
                     is SiteActionResult.Response -> {
                         val stillHere = page?.url == actionPage?.url
                         val managedFresh = managedReturn != null && isSamePageList(managedReturn, result.page.url)
                         if (managedFresh) {
+                            if (result.uncertainReceipt == null) {
+                                clearSelectionRecovery(managedReturn)
+                                managedRecoveryStore.clearPendingBatchSource(managedReturn)
+                            } else {
+                                // A structurally valid list is useful to inspect,
+                                // but does not by itself prove a multi-item change.
+                                invalidateManagement(managedReturn)
+                            }
                             managementRevision++
                             // Deleting/moving changes page boundaries. Old tails,
                             // selection contexts and in-flight appends are invalid.
@@ -1050,21 +1396,391 @@ class AppController(
                         formFiles = emptyMap()
                         toast = when {
                             result.uncertainReceipt != null -> "操作已提交，请刷新核对结果"
+                            managedFresh -> response.let { (it as? SiteActionResult.Response)?.page?.notice }.orEmpty().ifBlank { "列表已重新加载，请核对操作结果" }
                             direct -> result.page.notice.ifBlank { SiteActionRisk.successMessage(link) }
                             else -> result.page.notice.ifBlank { "操作已完成" }
                         }
                     }
-                    is SiteActionResult.Rejected -> error = result.message
-                    is SiteActionResult.Uncertain -> error = result.message
+                    is SiteActionResult.Rejected -> {
+                        managedReturn?.let(managedRecoveryStore::clearPendingBatchSource)
+                        error = result.message
+                    }
+                    is SiteActionResult.Uncertain -> {
+                        val bank = form?.form?.actionUrl?.contains("H_name=bank") == true ||
+                            link?.url?.contains("H_name=bank") == true
+                        error = if (bank) "服务器可能已执行该银行操作，但回执无法确认。请打开银行日志只读核对，不要自动重试。"
+                        else result.message
+                    }
                 }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = friendlyError(e) }
+            } catch (e: CancellationException) {
+                // The request may already have crossed the wire. Keep both the
+                // durable marker and the in-memory read-only recovery gate.
+                if (managedReturn != null) invalidateManagement(managedReturn)
+                throw e
+            }
+            catch (e: Exception) {
+                if (managedReturn != null) invalidateManagement(managedReturn)
+                error = friendlyError(e)
+            }
             finally { pendingSiteSubmission = null; pendingSiteDestination = null; siteBusy = false }
+        }
+    }
+
+    fun managementRecoveryFor(url: String): String? = managementRecoveries.firstOrNull { isSamePageList(resolve(url).url, it) }
+
+    private fun validManagementReadback(source: String, fresh: PageData): Boolean {
+        if (fresh.authStatus != AuthStatus.AUTHENTICATED || resolve(fresh.url).effect != SiteEffect.READ || !isSamePageList(source, fresh.url)) return false
+        val native = fresh.nativePage
+        return when {
+            source.substringBefore('?').endsWith("profile.php") -> native?.favorites != null || fresh.topics.isNotEmpty()
+            source.contains("action=banned") -> native?.blocklist != null
+            else -> native?.hasMessageList == true || fresh.topics.isNotEmpty()
+        }
+    }
+
+    private fun invalidateManagement(source: String) {
+        managementRevision++
+        managementRecoveries = managementRecoveries + source
+        recoveryState = recoveryState.copy(
+            pendingManagement = (recoveryState.pendingManagement + source).distinct().takeLast(8),
+        )
+        scheduleRecoveryPersist()
+        val snapshot = pageCache[source] ?: page?.takeIf { it.url == source }
+        timelines.values.distinct().filter { isSamePageList(it.first.url, source) }.forEach { it.invalidateManagement() }
+        pageCache.keys.filter { isSamePageList(resolve(it).url, source) }.toList().forEach(pageCache::remove)
+        // A non-paginated management page (e.g. blocklist) still needs to show
+        // the recovery affordance instead of an empty destination.
+        snapshot?.let { pageCache[source] = it }
+        if (siteFavorites?.url?.let { isSamePageList(it, source) } == true) siteFavorites = null
+    }
+
+    /** Read only. Never replay a delete/move, even if the previous result was unknown. */
+    fun recoverManagement(source: String) {
+        val target = managementRecoveryFor(source) ?: return
+        if (busy || siteBusy || purchaseBusy || resolve(target).effect != SiteEffect.READ) return
+        work { current ->
+            val fresh = service.fetch(target)
+            if (!current() || handleTimelineLogin(fresh, target)) return@work
+            require(validManagementReadback(target, fresh)) { "未获取到可核对的列表，请重新加载来源信箱或收藏分类" }
+            timelines.values.distinct().filter { isSamePageList(it.first.url, target) }.forEach { it.reset(fresh) }
+            clearSelectionRecovery(target)
+            recovery.clearPendingBatchSource(target)
+            rememberCachedPage(fresh, target)
+            if (page?.url?.let { isSamePageList(it, target) } == true) page = fresh
+            managementRevision++
+            toast = "列表已重新加载，请核对结果并重新选择；未重复提交操作"
         }
     }
     fun requestFiles(target: String, fieldId: String = "", multiple: Boolean = true, mimeTypes: List<String> = listOf("*/*")) {
         if (!busy && !siteBusy && !purchaseBusy) filePickerRequest = FilePickerRequest(target, fieldId, multiple, mimeTypes)
     }
+
+    // ---- Cross-page batch transaction ------------------------------------
+
+    fun requestBatchSiteSubmit(requests: List<BatchPageRequest>) {
+        if (busy || siteBusy || purchaseBusy || batchBusy || dailyBusy || rewardBusy || avatarBusy || pendingBatch != null || pendingSiteDestination != null || pendingSiteSubmission != null || pendingReward != null || pendingAvatar != null || pendingPurchase != null) return
+        if (requests.isEmpty() || requests.size > 8) { error = "批量操作的项目数量无效"; return }
+        if (requests.map { it.form.sourceUrl }.distinct().size != requests.size) {
+            error = "同一来源页只能提交一次，请重新选择"; return
+        }
+        if (requests.drop(1).any { !isSamePageList(requests.first().form.sourceUrl, it.form.sourceUrl) }) {
+            error = "所选项目不属于同一个列表，未提交"; return
+        }
+        val identities = requests.flatMap { request -> request.items.map { it.identity } }
+        if (identities.isEmpty() || identities.distinct().size != identities.size) {
+            error = "批量项目重复，请重新选择"; return
+        }
+        if (requests.any { managementRecoveryFor(it.form.sourceUrl) != null }) {
+            error = "有来源页待核对，请先重新加载列表"; return
+        }
+        if (requests.any { it.items.isEmpty() }) { error = "没有可提交的项目"; return }
+        pendingBatch = requests
+    }
+
+    fun dismissBatch() { if (!batchBusy) pendingBatch = null }
+    fun dismissBatchResult() { batchResult = null }
+
+    fun confirmBatch() {
+        val requests = pendingBatch ?: return
+        if (batchBusy || busy || siteBusy || purchaseBusy || dailyBusy || rewardBusy || avatarBusy ||
+            pendingSiteDestination != null || pendingSiteSubmission != null || pendingReward != null || pendingAvatar != null || pendingPurchase != null) return
+        pendingBatch = null
+        executeBatch(requests)
+    }
+
+    private fun executeBatch(requests: List<BatchPageRequest>) {
+        batchBusy = true
+        batchResult = null
+        error = null
+        val expectedOrigin = origin
+        val client = service
+        val transactionRecovery = recovery
+        transactionRecovery.savePendingBatch(PendingBatch(sourcePages = requests.map { it.form.sourceUrl },
+            itemIds = requests.flatMap { request -> request.items.map { it.identity } }, createdAt = currentEpochMillis()))
+        cancelRequest()
+        batchJob = scope.launch {
+            val results = mutableListOf<BatchItemResult>()
+            val uncertainSources = linkedSetOf<String>()
+            var stop = false
+            var currentIndex = -1
+            var interrupted = false
+            try {
+                for ((index, request) in requests.withIndex()) {
+                    currentIndex = index
+                    if (origin != expectedOrigin) break
+                    if (stop) {
+                        results += request.items.map { BatchItemResult(it, OperationOutcome.NOT_ATTEMPTED, "前一项结果无法确认，本次不再提交") }
+                        continue
+                    }
+                    // A transport that ignores cancellation must not append a
+                    // pre-write snapshot over a post-write list.
+                    timelines.values.distinct().filter { isSamePageList(it.first.url, request.form.sourceUrl) }.forEach { state ->
+                        state.requestId++; state.loading = false; state.refreshing = false
+                    }
+                    val response = try {
+                        client.submitSite(SiteSubmission(request.form, request.values, emptyList(), request.submit))
+                    } catch (e: CancellationException) { throw e
+                    } catch (_: Exception) {
+                        SiteActionResult.Uncertain("请求中断，无法确认服务器是否执行")
+                    }
+                    when (response) {
+                        is SiteActionResult.Rejected -> {
+                            results += request.items.map { BatchItemResult(it, OperationOutcome.REJECTED, response.message) }
+                            clearSelectionRecovery(request.form.sourceUrl)
+                        }
+                        is SiteActionResult.Uncertain -> {
+                            invalidateManagement(request.form.sourceUrl)
+                            uncertainSources.add(request.form.sourceUrl)
+                            results += request.items.map { BatchItemResult(it, OperationOutcome.UNCERTAIN, response.message) }
+                            stop = true
+                        }
+                        is SiteActionResult.Response -> {
+                            if (response.page.authStatus == AuthStatus.LOGIN_REQUIRED) {
+                                invalidateManagement(request.form.sourceUrl)
+                                uncertainSources.add(request.form.sourceUrl)
+                                results += request.items.map { BatchItemResult(it, OperationOutcome.UNCERTAIN, "登录状态已失效，无法确认提交结果") }
+                                stop = true
+                            } else {
+                                invalidateManagement(request.form.sourceUrl)
+                                // Prefer a response that is already a verified
+                                // copy of the source list. Otherwise GET exactly
+                                // the source page; never infer completion from
+                                // the mutation response page or HTTP status.
+                                val readback = if (validManagementReadback(request.form.sourceUrl, response.page)) {
+                                    response.page
+                                } else try {
+                                    client.fetch(request.form.sourceUrl)
+                                } catch (e: CancellationException) { throw e
+                                } catch (_: Exception) { null }
+                                if (readback == null || !validManagementReadback(request.form.sourceUrl, readback)) {
+                                    uncertainSources.add(request.form.sourceUrl)
+                                    results += request.items.map { BatchItemResult(it, OperationOutcome.UNCERTAIN, "操作已返回，但来源列表未能安全读回") }
+                                    stop = true
+                                    continue
+                                }
+                                if (pageNumber(readback.url) != pageNumber(request.form.sourceUrl)) {
+                                    uncertainSources.add(request.form.sourceUrl)
+                                    results += request.items.map { BatchItemResult(it, OperationOutcome.UNCERTAIN,
+                                        "删除后分页边界发生变化，无法仅凭当前页确认项目状态") }
+                                    stop = true
+                                    continue
+                                }
+                                val remaining = readback.nativePage?.forms.orEmpty()
+                                    .filter { isSamePageList(it.sourceUrl, request.form.sourceUrl) }
+                                    .flatMap { form -> form.fields.filter { field -> field.name == "delid[]" } }
+                                    .flatMap { field -> field.options.map { option -> option.value } }.toSet()
+                                request.items.forEach { item ->
+                                    val stillThere = item.stableId in remaining
+                                    if (!request.verifyAbsent) {
+                                        uncertainSources.add(request.form.sourceUrl)
+                                        results += BatchItemResult(item, OperationOutcome.UNCERTAIN,
+                                            "请求已提交并读回列表；目标状态需人工核对")
+                                    } else {
+                                        val success = !stillThere
+                                        results += BatchItemResult(item,
+                                            if (success) OperationOutcome.SUCCESS else OperationOutcome.REJECTED,
+                                            if (success) "" else "项目仍在列表中，可能未执行")
+                                    }
+                                }
+                                if (request.verifyAbsent) {
+                                    clearSelectionRecovery(request.form.sourceUrl)
+                                    transactionRecovery.clearPendingBatchSource(request.form.sourceUrl)
+                                }
+                                val freshState = timelineFor(readback)
+                                freshState.reset(readback)
+                                rememberCachedPage(readback, request.form.sourceUrl)
+                                if (page?.url?.let { isSamePageList(it, request.form.sourceUrl) } == true) page = readback
+                            }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                interrupted = true
+                requests.getOrNull(currentIndex)?.let { request ->
+                    invalidateManagement(request.form.sourceUrl)
+                    uncertainSources.add(request.form.sourceUrl)
+                    val known = results.map { it.item.identity }.toSet()
+                    request.items.filterNot { it.identity in known }.forEach { item ->
+                        results += BatchItemResult(item, OperationOutcome.UNCERTAIN, "操作中断，服务器可能已执行；请先核对来源列表")
+                    }
+                }
+                requests.drop((currentIndex + 1).coerceAtLeast(0)).forEach { request ->
+                    request.items.forEach { item ->
+                        results += BatchItemResult(item, OperationOutcome.NOT_ATTEMPTED, "前一项中断，本项未自动提交")
+                    }
+                }
+                throw cancelled
+            } catch (_: Exception) {
+                interrupted = true
+                requests.getOrNull(currentIndex)?.let { request ->
+                    invalidateManagement(request.form.sourceUrl)
+                    uncertainSources.add(request.form.sourceUrl)
+                    val known = results.map { it.item.identity }.toSet()
+                    request.items.filterNot { it.identity in known }.forEach { item ->
+                        results += BatchItemResult(item, OperationOutcome.UNCERTAIN, "处理回执时发生错误，服务器可能已执行")
+                    }
+                }
+                requests.drop((currentIndex + 1).coerceAtLeast(0)).forEach { request ->
+                    request.items.forEach { item ->
+                        results += BatchItemResult(item, OperationOutcome.NOT_ATTEMPTED, "前一项无法确认，本项未自动提交")
+                    }
+                }
+            } finally {
+                if (origin == expectedOrigin) {
+                    if (uncertainSources.isNotEmpty()) {
+                        transactionRecovery.savePendingBatch(PendingBatch(
+                            sourcePages = uncertainSources.toList(),
+                            itemIds = results.filter { it.outcome == OperationOutcome.UNCERTAIN }.map { it.item.identity },
+                            createdAt = currentEpochMillis(),
+                        ))
+                    } else if (!interrupted) {
+                        transactionRecovery.clearPendingBatch()
+                    }
+                    if (results.isNotEmpty()) batchResult = classifyBatchResult(results)
+                    batchBusy = false
+                    if (batchResult != null) toast = batchResult?.summary()
+                }
+            }
+        }
+    }
+
+    private fun clearSelectionRecovery(source: String) {
+        managementRecoveries = managementRecoveries.filterNot { isSamePageList(it, source) }.toSet()
+        recoveryState = recoveryState.copy(
+            pendingManagement = recoveryState.pendingManagement.filterNot { isSamePageList(it, source) },
+        )
+        scheduleRecoveryPersist()
+    }
+
+    // ---- Reward / avatar / gugu protocols --------------------------------
+
+    fun requestReward(action: RewardAction) {
+        if (rewardBusy || busy || siteBusy || purchaseBusy || batchBusy || dailyBusy || avatarBusy || pendingBatch != null || pendingSiteDestination != null || pendingSiteSubmission != null || pendingAvatar != null || pendingPurchase != null || pendingMessageConfirm) return
+        if (resolve(action.sourceUrl).effect != SiteEffect.READ) { error = "奖励来源页面不可信"; return }
+        pendingReward = action
+    }
+
+    fun dismissReward() { if (!rewardBusy) pendingReward = null }
+
+    fun confirmReward() {
+        val action = pendingReward ?: return
+        if (rewardBusy || busy || siteBusy || purchaseBusy || batchBusy || dailyBusy || avatarBusy || pendingBatch != null || pendingSiteDestination != null || pendingSiteSubmission != null || pendingAvatar != null || pendingPurchase != null) return
+        pendingReward = null
+        rewardBusy = true
+        error = null
+        val expected = origin
+        scope.launch {
+            try {
+                when (val result = service.executeReward(action)) {
+                    is RewardExecutionResult.Confirmed -> toast = result.message
+                    is RewardExecutionResult.Rejected -> error = result.message
+                    is RewardExecutionResult.Uncertain -> error = result.message
+                }
+                if (origin == expected && action.readbackUrl.startsWith("$origin/")) {
+                    // Read-only refresh gives the user a chance to verify the
+                    // status; a failure here does not rewrite the receipt.
+                    runCatching { service.fetch(action.readbackUrl) }.getOrNull()?.let { fresh ->
+                        if (origin == expected) {
+                            pageCache[fresh.url] = fresh
+                            timelines[fresh.url]?.reset(fresh)
+                            if (page?.url == action.readbackUrl || page?.url == fresh.url) page = fresh
+                        }
+                    }
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) { error = "奖励操作结果无法确认，请刷新奖励页面核对；不会自动重试" }
+            finally { if (origin == expected) rewardBusy = false }
+        }
+    }
+
+    fun confirmAvatarUpload() {
+        val file = pendingAvatar ?: return
+        if (siteBusy || purchaseBusy || batchBusy || rewardBusy || dailyBusy || busy || pendingBatch != null || pendingSiteDestination != null || pendingSiteSubmission != null || pendingReward != null || pendingPurchase != null || pendingMessageConfirm) return
+        val form = page?.nativePage?.forms?.firstOrNull { form ->
+            form.sourceUrl.substringBefore('?').endsWith("profile.php") &&
+                form.sourceUrl.contains("action=modify") && form.multipart &&
+                form.hidden.any { it.name == "facetype" }
+        }
+        if (form == null || avatarBusy) { error = "请从修改资料页面重新选择头像"; pendingAvatar = null; return }
+        avatarBusy = true
+        error = null
+        val expected = origin
+        val client = service
+        scope.launch {
+            try {
+                when (val result = client.uploadAvatar(AvatarUploadRequest(form, file, 140, 200))) {
+                    is AvatarUploadResult.Uploaded -> {
+                        pendingAvatar = null
+                        val profileUrl = home?.menu?.firstOrNull { it.url.contains("profile.php?action=show") }?.url ?: page?.url
+                        if (profileUrl == null) {
+                            error = "头像文件已上传，但无法读取资料页确认最终显示；请刷新资料后核对，不要自动重传。"
+                            return@launch
+                        }
+                        val fresh = try { client.fetch(profileUrl) } catch (e: CancellationException) { throw e
+                        } catch (_: Exception) { null }
+                        if (origin != expected) return@launch
+                        val shownAvatar = fresh?.nativePage?.profile?.avatar.orEmpty().substringBefore('?')
+                        val uploadedAvatar = result.avatarUrl.substringBefore('?')
+                        if (fresh != null) {
+                            pageCache[fresh.url] = fresh
+                            timelines[fresh.url]?.reset(fresh)
+                            accountProfile = fresh.nativePage?.profile ?: accountProfile
+                            accountAvatar = fresh.nativePage?.profile?.avatar ?: accountAvatar
+                        }
+                        if (shownAvatar.isNotBlank() && shownAvatar == uploadedAvatar) {
+                            toast = "新头像已在资料页显示"
+                        } else {
+                            error = "头像文件已上传，但资料页尚未显示对应新头像；资料保存状态未确认，请刷新核对后再决定下一步。"
+                        }
+                    }
+                    is AvatarUploadResult.Rejected -> { pendingAvatar = null; error = result.message }
+                    is AvatarUploadResult.Uncertain -> { pendingAvatar = null; error = result.message }
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) { pendingAvatar = null; error = "头像上传结果无法确认，请刷新资料页核对；不会自动重试" }
+            finally { if (origin == expected) avatarBusy = false }
+        }
+    }
+
+    fun loadGugu(force: Boolean = false) {
+        if (guguBusy || (!force && gugu != null)) return
+        guguBusy = true
+        guguError = null
+        val expected = origin
+        scope.launch {
+            try {
+                val snapshot = service.gugu()
+                if (origin == expected) {
+                    if (snapshot == null) guguError = "咕咕镇登录入口暂不可用，请先在网页版确认游戏入口。"
+                    else gugu = snapshot
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) {
+                if (origin == expected) guguError = "咕咕镇暂时无法读取；游戏数据不会在本机缓存。"
+            } finally { if (origin == expected) guguBusy = false }
+        }
+    }
+
     fun receiveFiles(request: FilePickerRequest, files: List<LocalUpload>, failure: String? = null) {
         filePickerRequest = null
         failure?.let { error = it; return }
@@ -1075,11 +1791,13 @@ class AppController(
             val merged = editorFiles + files.map { it.copy(slot = nextUploadSlot++) }
             if (merged.any { it.size > form.uploadMaxBytes }) { error = "附件超过站点大小限制"; return }
             editorFiles = merged
+            markDraftChanged()
         } else formFiles = formFiles + ("${request.target}@${request.fieldId}" to files)
     }
     fun removeEditorFile(id: String) {
         editorFiles.firstOrNull { it.id == id }?.let { draftContent = draftContent.replace("[upload=${it.slot}]", "") }
         editorFiles = editorFiles.filterNot { it.id == id }
+        markDraftChanged()
     }
     fun openNativeLoginOptions() {
         rememberNavigationSource()
@@ -1111,6 +1829,10 @@ class AppController(
     }
     fun consumeNativePage() { pendingNativePage = null }
     private fun clearNativeTransientState() {
+        pendingBatch = null; batchBusy = false; batchResult = null
+        pendingReward = null; rewardBusy = false
+        pendingAvatar = null; avatarBusy = false
+        gugu = null; guguBusy = false; guguError = null
         lastSearchKeyword = ""; lastSearchAuthor = ""
         messageListUrl = null
         showSiteTools = false; pendingNativePage = null; pendingSiteDestination = null; pendingSiteSubmission = null
@@ -1123,13 +1845,15 @@ class AppController(
     fun dismissSessionNotice() { sessionNotice = null }
     fun clearError() { error = null }
     fun logout() {
-        if (purchaseBusy || siteBusy) return
+        if (purchaseBusy || siteBusy || batchBusy || rewardBusy || avatarBusy || dailyBusy) return
         cancelRequest(); service.close(); service.clearSession(); home = null; page = null; editor = null
+        draftJob?.cancel(); recoveryJob?.cancel(); restoreJob?.cancel(); batchJob?.cancel()
         store.remove("daily_signed@$origin"); dailySigned = false
         avatarJob?.cancel(); accountAvatar = null; accountProfile = null
         profileAvatars.clear(); profileAvatarLoading.clear()
         draftContent = ""; draftTitle = ""; draftRecipient = ""
-        draftCategory = ""; draftKeywords = ""
+        draftCategory = ""; draftKeywords = ""; draftAttachmentNotice = null; draftRestored = false
+        pendingMentionName = null; pendingMessageConfirm = false
         backStack.clear(); pageCache.clear(); showLogin = true; busy = false
         clearTimelines()
         loginReturnUrl = null; pendingPurchase = null; showEmoticonPicker = false
@@ -1154,5 +1878,5 @@ class AppController(
     private fun readHistory() = readLinks("history")
     private fun saveLinks(key: String, links: List<SiteLink>) = store.put("$key@$origin", links.joinToString("\n") { "${it.url.replace("\n", "").replace("\t", "")}\t${it.title.replace("\n", " ").replace("\t", " ")}" })
     fun clearHistory() { history = emptyList(); store.remove("history@$origin") }
-    fun close() { cancelRequest(); clearTimelines(); purchaseJob?.cancel(); siteJob?.cancel(); favoritesJob?.cancel(); catalogJob?.cancel(); avatarJob?.cancel(); service.close() }
+    fun close() { cancelRequest(); clearTimelines(); purchaseJob?.cancel(); siteJob?.cancel(); favoritesJob?.cancel(); catalogJob?.cancel(); avatarJob?.cancel(); recoveryJob?.cancel(); draftJob?.cancel(); restoreJob?.cancel(); batchJob?.cancel(); service.close() }
 }

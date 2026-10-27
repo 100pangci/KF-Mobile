@@ -63,6 +63,24 @@ class UiEdgeRenderTest {
             render("progress") { NativeSiteScreen(c, progress, KfActions(), rich, { _, _, _ -> }) }
             val faq = parser.parse("<div class='dcol' style='width:900px'><table><tr><td>规则</td><td>不能因同一行包含链接而隐藏的说明 <a href='faq.php?id=1'>帮助</a><a href='faq.php?id=2'>补充</a></td></tr><tr><td>详细说明</td><td>${"合成长规则。".repeat(100)}</td></tr></table></div>", "${c.origin}/faq.php")
             render("faq-mixed-links") { NativeSiteScreen(c, faq, KfActions(), rich, { _, _, _ -> }) }
+            // Recovery UI is synthetic and mutations are intercepted by DemoService.
+            val managementHtml = """<div class='dcol' style='width:900px'><form method='post' action='message.php'>
+                <input name='verify' type='hidden' value='synthetic'><table><tr><th>标题</th><th>选定</th></tr>
+                <tr><td><a href='read.php?tid=1'>合成待核对项目</a></td><td><input name='delid[]' type='checkbox' value='1'></td></tr></table><input type='submit' value='删除'></form></div>"""
+            service.siteResult = SiteActionResult.Uncertain("合成结果未知，未执行服务器操作")
+            listOf(false, true).forEach { favorites ->
+                val url = if (favorites) "${c.origin}/profile.php?action=favor" else "${c.origin}/message.php?action=sendbox"
+                val messageHtml = managementHtml.replace("<tr><th>标题</th><th>选定</th></tr>", "<tr><th>ID</th><th>标题</th><th>发件人</th><th>收件人</th><th>时间</th><th>已读</th><th>选定</th></tr>")
+                    .replace("<tr><td><a href='read.php?tid=1'>合成待核对项目</a></td><td>", "<tr><td>1</td><td><a href='message.php?action=read&amp;mid=1'>合成待核对项目</a></td><td>合成发件人</td><td>合成收件人</td><td>2026-01-01</td><td>是</td><td>")
+                val managed = parser.parse(if (favorites) managementHtml else messageHtml, url)
+                if (!favorites) assertEquals(1, managed.nativePage!!.messages.size)
+                c.presentNativePage(managed)
+                val managedForm = managed.nativePage!!.forms.single()
+                c.requestSiteSubmit(managedForm, managedForm.fields.associate { it.id to listOf("1") }, managedForm.submits.single())
+                if (c.pendingBatch != null) c.confirmBatch() else c.confirmSiteAction()
+                assertNotNull(c.managementRecoveryFor(url))
+                render(if (favorites) "favorites-recovery" else "messages-recovery") { ListingScreen(c, KfActions(), managed, !favorites, rich = rich) }
+            }
         } finally { c.close(); scope.cancel() }
     }
 }

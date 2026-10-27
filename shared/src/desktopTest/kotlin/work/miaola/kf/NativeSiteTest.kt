@@ -60,10 +60,12 @@ class NativeSiteTest {
             <td style="background-color:#CED83C"><a href="kf_growup.php?ok=2&amp;color=3">c3</a></td>
             </tr></table></div>"""
         val claimed = parser.parse(html("javascript:;", "STATUS"), "$origin/kf_growup.php").nativePage!!.growth!!
-        assertTrue(claimed.claimed)
+        assertFalse(claimed.claimed)
+        assertEquals(StatusKind.UNKNOWN, claimed.claimStatus)
         assertNull(claimed.claimUrl)
         val open = parser.parse(html("kf_growup.php?ok=1&amp;safeid=x", "STATUS"), "$origin/kf_growup.php").nativePage!!.growth!!
         assertFalse(open.claimed)
+        assertEquals(StatusKind.AVAILABLE, open.claimStatus)
         assertNotNull(open.claimUrl)
         assertEquals("10", open.level)
         assertEquals("3", open.coefficient)

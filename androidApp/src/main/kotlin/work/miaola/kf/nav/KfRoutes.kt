@@ -16,6 +16,7 @@ object KfRoutes {
     const val MESSAGE = "message?url={url}"
     const val PROFILE = "profile?url={url}"
     const val NATIVE = "native?url={url}"
+    const val GUGU = "gugu"
     const val EDITOR = "editor?url={url}"
     const val SEARCH = work.miaola.kf.ui.KfSearchRoute.pattern
 
@@ -50,6 +51,7 @@ fun NavBackStackEntry.kfLocation(): KfLocation {
         KfRoutes.ACCOUNT -> KfLocation(KfDestinationKind.ACCOUNT)
         KfRoutes.SETTINGS -> KfLocation(KfDestinationKind.SETTINGS)
         KfRoutes.LOGIN -> KfLocation(KfDestinationKind.LOGIN)
+        KfRoutes.GUGU -> KfLocation(KfDestinationKind.GUGU)
         KfRoutes.LISTING -> KfLocation(KfDestinationKind.LISTING, arg("url"))
         KfRoutes.READER -> KfLocation(KfDestinationKind.READER, arg("url"))
         KfRoutes.MESSAGES -> KfLocation(KfDestinationKind.MESSAGES, arg("url"))

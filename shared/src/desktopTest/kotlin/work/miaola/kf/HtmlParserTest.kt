@@ -108,4 +108,20 @@ class HtmlParserTest {
         val otherPost = html.replace("tid=1&amp;pid=tpc", "tid=2&amp;pid=tpc")
         assertTrue(parser.parse(otherPost, "https://kf.miaola.work/read.php?tid=1").posts.single().purchases.isEmpty())
     }
+
+    @Test fun mentionsAreStructuredOnlyWhenTheProfileLinkCarriesAnAtSign() {
+        val base = "<div class='readtext' id='pidtpc'><table><tr><td width='190'><div class='readidms'><a href='profile.php?action=show&amp;uid=1'>作者</a></div></td>" +
+            "<td width='990'><div><div id='floor0'><span>楼主</span><span>2026-01-01 10:00</span></div>%s</div></td></tr></table></div>"
+        val mention = parser.parse(base.format("<p>你好 <a href='profile.php?action=show&amp;uid=42&amp;sf=abc'>@合成用户</a>，请查看。</p>"),
+            "https://kf.miaola.work/read.php?tid=1").posts.single().mentions.single()
+        assertEquals("合成用户", mention.displayName)
+        assertEquals("42", mention.uid)
+        assertTrue(mention.profileUrl.contains("profile.php"))
+        assertTrue(parser.parse(base.format("<p>联系 408547682@qq.com，不是提及。</p>"),
+            "https://kf.miaola.work/read.php?tid=1").posts.single().mentions.isEmpty())
+        assertTrue(parser.parse(base.format("<p><a href='profile.php?action=show&amp;uid=42'>普通资料链接</a></p>"),
+            "https://kf.miaola.work/read.php?tid=1").posts.single().mentions.isEmpty())
+        assertEquals("甲,乙", mergeMentionKeywords("甲", "谢谢 @乙 和 @甲，另外不是邮箱 a@b.com"))
+        assertEquals("甲", mergeMentionKeywords("甲", "联系 a@b.com"))
+    }
 }

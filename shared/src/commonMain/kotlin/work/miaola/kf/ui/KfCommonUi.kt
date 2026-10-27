@@ -67,6 +67,84 @@ fun KfGlobalDialogs(c: AppController, logout: Boolean = false, onLogoutChange: (
         confirmButton = { TextButton(onClick = { c.confirmDiscard = false; c.dismissEditor() }) { Text("丢弃") } },
         dismissButton = { TextButton(onClick = { c.confirmDiscard = false }) { Text("继续编辑") } })
 
+    if (c.pendingMessageConfirm) AlertDialog(onDismissRequest = c::dismissMessageConfirm,
+        title = { Text("确认私信收件人") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("收件人：${c.draftRecipient}")
+                Text("站点按用户名查找，客户端无法确认是否绑定了唯一的 UID，也不会在成功文案中伪造 UID。",
+                    style = MaterialTheme.typography.bodySmall)
+                Text("发送后只有在发件箱出现新的对应消息时，才会显示“已发送”。",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = c::confirmMessageSend) { Text("确认发送") } },
+        dismissButton = { TextButton(onClick = c::dismissMessageConfirm) { Text("返回编辑") } })
+
+    c.pendingBatch?.let { requests ->
+        val count = requests.sumOf { it.items.size }
+        AlertDialog(onDismissRequest = c::dismissBatch, title = { Text("确认跨页提交？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("将依次提交 ${requests.size} 个来源页，共 $count 项。每个来源页单独复核令牌和项目。")
+                    Text("站点没有跨页原子事务：若中途返回不明确，剩余页面会停止，不会自动重试。",
+                        style = MaterialTheme.typography.bodySmall)
+                    Text("服务器：${c.origin}", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = c::confirmBatch, enabled = !c.batchBusy) { Text(if (c.batchBusy) "正在提交…" else "确认提交") } },
+            dismissButton = { TextButton(onClick = c::dismissBatch, enabled = !c.batchBusy) { Text("取消") } })
+    }
+
+    c.pendingReward?.let { action ->
+        AlertDialog(onDismissRequest = c::dismissReward, title = { Text("确认执行奖励操作？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(action.title)
+                    Text(if (action.protocol == RewardProtocol.AJAX_POST)
+                        "只执行一个战斗步骤，不会自动连续攻击；结果不明确时不会重试。"
+                    else "领取可能消耗资格或次数；提交后会重新读取奖励状态确认。",
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text("服务器：${c.origin}", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = c::confirmReward, enabled = !c.rewardBusy) { Text(if (c.rewardBusy) "正在执行…" else "确认执行") } },
+            dismissButton = { TextButton(onClick = c::dismissReward, enabled = !c.rewardBusy) { Text("取消") } })
+    }
+
+    c.batchResult?.let { result ->
+        val results = result.results()
+        val failed = results.filter { it.outcome != OperationOutcome.SUCCESS }
+        AlertDialog(onDismissRequest = c::dismissBatchResult,
+            title = { Text(when (result) {
+                is BatchTransactionResult.Completed -> "批量操作已完成"
+                is BatchTransactionResult.Partial -> "部分项目未完成"
+                is BatchTransactionResult.Failed -> "批量操作未完成"
+                is BatchTransactionResult.Uncertain -> "部分结果无法确认"
+            }) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(result.summary())
+                    if (failed.isNotEmpty()) {
+                        Text("未完成 / 待核对：", style = MaterialTheme.typography.labelMedium)
+                        failed.take(8).forEach { item ->
+                            Text("· ${item.item.label.ifBlank { item.item.stableId }}：${item.message.ifBlank {
+                                when (item.outcome) {
+                                    OperationOutcome.REJECTED -> "被站点拒绝"
+                                    OperationOutcome.UNCERTAIN -> "结果无法确认"
+                                    OperationOutcome.NOT_ATTEMPTED -> "未执行"
+                                    OperationOutcome.SUCCESS -> "已完成"
+                                }
+                            }}", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (failed.size > 8) Text("…另有 ${failed.size - 8} 项", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text("列表已重新加载；请核对后再重新选择。", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = c::dismissBatchResult) { Text("知道了") } })
+    }
+
     c.pendingPurchase?.let { offer ->
         AlertDialog(onDismissRequest = c::dismissPurchase, icon = { Icon(Icons.Default.ShoppingCart, null) },
             title = { Text(if (c.purchaseBusy) "正在提交购买" else "确认购买付费内容？") },
@@ -114,7 +192,7 @@ fun KfPageActions(c: AppController, kind: KfDestinationKind, page: PageData?, ac
     var menu by remember(kind, page?.url) { mutableStateOf(false) }
     val favoriteListing = page?.nativePage?.favorites != null
     if (kind == KfDestinationKind.EDITOR) {
-        TextButton(onClick = c::submit, enabled = c.editor != null && !c.busy && !c.submitUncertain) {
+        TextButton(onClick = c::requestEditorSubmit, enabled = c.editor != null && !c.busy && !c.submitUncertain) {
             if (c.busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             else Text(if (c.editor?.recipientField != null) "发送" else "发布")
         }

@@ -298,10 +298,16 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
     var activeSource by rememberSaveable(page?.url) { mutableStateOf(page?.url.orEmpty()) }
     val bulkForm = sources.firstOrNull { it.sourceUrl == activeSource } ?: sources.firstOrNull()
     val bulkFields = bulkForm?.fields?.filter { it.name == "delid[]" }.orEmpty()
-    val deleteAction = bulkForm?.fields?.firstOrNull { it.name == "action" && it.kind == SiteFieldKind.RADIO && it.options.any { option -> option.value == "del" } }
     val selection = remember(page?.url) { SourcePageSelection() }
     LaunchedEffect(c.managementRevision) { selection.clear() }
     val selected = bulkForm?.let(selection::fieldIds).orEmpty()
+    fun batchRequests(): List<BatchPageRequest> = sources.mapNotNull { form ->
+        val values = selection.values(form)
+        if (values.isEmpty()) return@mapNotNull null
+        val action = form.fields.firstOrNull { it.name == "action" && it.kind == SiteFieldKind.RADIO && it.options.any { option -> option.value == "del" } }
+        val overrides = form.fields.associate { field -> field.id to if (field.id == action?.id) listOf("del") else field.initial }
+        buildBatchPageRequest(form, values, overrides)
+    }
     if (c.showTopicFilters && page?.url?.substringBefore('?')?.endsWith("thread.php") == true) ModalBottomSheet(onDismissRequest = { c.showTopicFilters = false }) {
         Text("筛选主题", Modifier.padding(24.dp), style = MaterialTheme.typography.titleLarge)
         LazyColumn(Modifier.heightIn(max = 480.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
@@ -321,7 +327,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                     )
                 }
                 if (isMessages) Box {
-                    IconButton(onClick = { menu = true }, modifier = Modifier.size(36.dp)) { Icon(Icons.Default.MoreVert, "消息操作") }
+                    IconButton(onClick = { menu = true }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.MoreVert, "消息操作") }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem(text = { Text("消息跟踪") }, leadingIcon = { Icon(Icons.Default.TrackChanges, null) }, onClick = { menu = false; actions.open("message.php?action=scout") })
                         DropdownMenuItem(text = { Text("写新消息") }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = { menu = false; page?.composeUrl?.let(actions.open) })
@@ -333,6 +339,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
             }
         }
         if (isMessages) item { MessageTabs(page?.url.orEmpty(), managing, actions) { managing = it } }
+        if (isMessages && page != null) item { ManagementRecovery(c, page.url) }
         if (!managing && topics.isEmpty() && (!isMessages || messages.isEmpty())) item { EmptyState(c.busy && page == null, page?.notice.orEmpty(), { page?.let { c.refreshTimeline(it, search) } }) }
         if (isMessages) {
             if (managing) {
@@ -363,15 +370,16 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                     }
                     item {
                         Button(onClick = {
-                            val chosen = selected
-                            val values = bulkForm.fields.associate { field ->
-                                 field.id to if (field.name == "delid[]") {
-                                     if (field.id in chosen) field.options.map { it.value } else emptyList()
-                                 } else if (field.id == deleteAction?.id) listOf("del") else field.initial
-                            }
-                            c.requestSiteSubmit(bulkForm, values, bulkForm.submits.first())
-                        }, enabled = selected.isNotEmpty() && !c.siteBusy, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-                            Text(if (c.siteBusy) "正在提交…" else "删除所选（${selected.size}）")
+                            val requests = batchRequests()
+                            if (requests.isEmpty() || requests.size != selection.pageCount) {
+                                c.reportPlatformResult("所选来源页已变化或无法安全复核，未提交", true)
+                            } else c.requestBatchSiteSubmit(requests)
+                        }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                            Text(when {
+                                c.batchBusy -> "正在提交…"
+                                selection.pageCount > 1 -> "跨页删除所选（${selection.pageCount} 页 · ${selection.count} 项）"
+                                else -> "删除本页所选（${selected.size}）"
+                            })
                         }
                     }
                 }
@@ -438,7 +446,12 @@ private fun MessageRow(link: SiteLink, onClick: (String) -> Unit) {
 fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAvatar: ForumImage, richContent: RichContent) {
     val page = page ?: return
     val state = rememberLazyListState()
-    val timeline = ListInteractions(c, state, page)
+    val timeline = ListInteractions(c, state, page, anchorKeyAt = { index ->
+        when (index) {
+            0 -> "title"
+            else -> c.timelineFor(page).posts.getOrNull(index - 1)?.id ?: "footer"
+        }
+    })
     LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 6.dp, 16.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             SelectionContainer { Text(page.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
@@ -449,7 +462,7 @@ fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAva
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val avatar = post.avatar.ifBlank { c.avatarFor(post.authorUrl).orEmpty() }
                         LaunchedEffect(post.authorUrl) { c.loadAvatar(post.authorUrl) }
-                        Surface(Modifier.size(36.dp).clickable(enabled = post.authorUrl.isNotEmpty()) { actions.open(post.authorUrl) }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Surface(Modifier.size(48.dp).clickable(enabled = post.authorUrl.isNotEmpty()) { actions.open(post.authorUrl) }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
                             Box(contentAlignment = Alignment.Center) {
                                 Text(post.author.take(1), fontWeight = FontWeight.Bold)
                                 if (avatar.isNotBlank()) forumAvatar(avatar, post.author.take(1), Modifier.fillMaxSize())
@@ -545,6 +558,11 @@ private fun PostMenu(post: ForumPost, c: AppController, actions: KfActions) {
             if (post.quoteUrl.isNotBlank()) DropdownMenuItem(
                 text = { Text("引用回复") }, leadingIcon = { Icon(Icons.Default.FormatQuote, null) },
                 onClick = { open = false; actions.open(post.quoteUrl) },
+            )
+            val mentionUrl = c.page?.composeUrl
+            if (post.authorUrl.contains("profile.php") && post.author.isNotBlank() && mentionUrl != null) DropdownMenuItem(
+                text = { Text("提及 ${post.author}") }, leadingIcon = { Icon(Icons.Default.AlternateEmail, null) },
+                onClick = { open = false; c.openEditorWithMention(mentionUrl, post.author) },
             )
             post.actions.forEach { action ->
                 DropdownMenuItem(
@@ -886,14 +904,22 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
         }
     }
     LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        if (form.recipientField != null) item { OutlinedTextField(c.draftRecipient, { c.draftRecipient = it }, Modifier.fillMaxWidth(), label = { Text("收件人") }, singleLine = true, enabled = !c.busy) }
+        if (form.recipientField != null) item { OutlinedTextField(c.draftRecipient, { c.updateDraftRecipient(it) }, Modifier.fillMaxWidth(),
+            label = { Text("收件人") }, singleLine = true, enabled = !c.busy,
+            supportingText = { Text("站点按用户名查找；请确认没有同名或相似昵称。客户端不会声称已绑定了某个 UID。") }) }
+        if (c.draftRestored) item {
+            Text("已恢复上次编辑的草稿。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        c.draftAttachmentNotice?.let { notice -> item {
+            Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        } }
         if (form.categories.isNotEmpty()) item {
             Box {
                 OutlinedButton(onClick = { categories = true }, Modifier.fillMaxWidth(), enabled = !c.busy) { Text(form.categories.firstOrNull { it.value == c.draftCategory }?.label ?: "选择分类"); Icon(Icons.Default.ExpandMore, null) }
-                DropdownMenu(categories, { categories = false }) { form.categories.forEach { option -> DropdownMenuItem(text = { Text(option.label) }, onClick = { c.draftCategory = option.value; categories = false }) } }
+                DropdownMenu(categories, { categories = false }) { form.categories.forEach { option -> DropdownMenuItem(text = { Text(option.label) }, onClick = { c.updateDraftCategory(option.value); categories = false }) } }
             }
         }
-        item { OutlinedTextField(c.draftTitle, { c.draftTitle = it }, Modifier.fillMaxWidth(), label = { Text("标题") }, enabled = !c.busy, shape = RoundedCornerShape(16.dp)) }
+        item { OutlinedTextField(c.draftTitle, { c.updateDraftTitle(it) }, Modifier.fillMaxWidth(), label = { Text("标题") }, enabled = !c.busy, shape = RoundedCornerShape(16.dp)) }
         item {
             Column {
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
@@ -908,12 +934,12 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
                     IconButton(onClick = { focusBody = true; focusManager.clearFocus(); keyboard?.hide(); c.showEmoticonPicker = true }, enabled = !c.busy) { Icon(Icons.Default.InsertEmoticon, "表情") }
                     if (form.uploadEnabled) IconButton(onClick = { c.requestFiles("editor") }, enabled = !c.busy) { Icon(Icons.Default.AttachFile, "附件") }
                 }
-                TextField(body, { body = it; c.draftContent = it.text }, Modifier.fillMaxWidth().heightIn(min = 250.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
+                TextField(body, { body = it; c.updateDraftContent(it.text) }, Modifier.fillMaxWidth().heightIn(min = 250.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
                     colors = TextFieldDefaults.colors(focusedContainerColor = MaterialTheme.colorScheme.background, unfocusedContainerColor = MaterialTheme.colorScheme.background))
             }
         }
-        if ("diy_guanjianci" in form.fields) item { OutlinedTextField(c.draftKeywords, { c.draftKeywords = it }, Modifier.fillMaxWidth(), label = { Text("关键词 / @用户") }, supportingText = { Text("按站点规则使用英文逗号分隔，最多 5 个。") }, enabled = !c.busy) }
-        item { Text("草稿只在本次编辑中保留。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if ("diy_guanjianci" in form.fields) item { OutlinedTextField(c.draftKeywords, { c.updateDraftKeywords(it) }, Modifier.fillMaxWidth(), label = { Text("关键词 / @用户") }, supportingText = { Text("按站点规则使用英文逗号分隔，最多 5 个。正文里的 @用户名 会在发送时合并到这里。") }, enabled = !c.busy) }
+        item { Text("草稿会加密保存在本机，重启后可恢复；附件需要重新选择。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (form.uploadEnabled) item {
             OutlinedButton(onClick = { c.requestFiles("editor") }, Modifier.fillMaxWidth(), enabled = !c.busy) { Icon(Icons.Default.AttachFile, null); Text(" 选择附件（最多 ${form.uploadLimit} 个）") }
             Text("每个不超过 ${form.uploadMaxBytes / 1024} KB，最多 ${form.uploadLimit} 个。", style = MaterialTheme.typography.bodySmall)
@@ -925,7 +951,7 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
                 IconButton(onClick = { c.removeEditorFile(file.id) }, enabled = !c.busy) { Icon(Icons.Default.Close, "删除附件") }
             }
         }
-        if (c.submitUncertain) item { OutlinedButton(onClick = c::checkEditorSubmission, Modifier.fillMaxWidth()) { Text("核对站点结果") } }
+        if (c.submitUncertain) item { OutlinedButton(onClick = c::checkEditorSubmission, Modifier.fillMaxWidth()) { Text("检查发件箱 / 核对站点结果") } }
     }
     if (showEmoticons) ModalBottomSheet(onDismissRequest = { c.showEmoticonPicker = false; focusBody = true }) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {

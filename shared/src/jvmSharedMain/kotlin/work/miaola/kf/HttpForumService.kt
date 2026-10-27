@@ -114,6 +114,7 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     private var faceScript: String? = null
     private val purchaseMutex = Mutex()
     private val siteMutex = Mutex()
+    private val editorSubmitMutex = Mutex()
     private val client = OkHttpClient.Builder().cookieJar(cookieJar).followRedirects(false).followSslRedirects(false)
         .retryOnConnectionFailure(false).connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).apply { if (transport != null) addInterceptor(transport) }.build()
@@ -220,7 +221,7 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         return form.copy(emoticons = faces.ifEmpty { fallback })
     }
 
-    override suspend fun submit(form: EditorForm, values: Map<String, String>): SubmitResult {
+    override suspend fun submit(form: EditorForm, values: Map<String, String>): SubmitResult = editorSubmitMutex.withLock {
         require(sameOrigin(form.action) && sameOrigin(form.sourceUrl)) { "提交域名不匹配" }
         gbkForm(form.fields + values) // Validate encoding before making any request.
         val pendingKey = if (form.recipientField != null) {
@@ -228,23 +229,70 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
                 .joinToString("") { "${it.length}:$it" }
             "message_pending@$origin#" + java.security.MessageDigest.getInstance("SHA-256").digest(intent.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
         } else null
-        if (pendingKey != null && store.get(pendingKey) != null) return SubmitResult.Uncertain("这封私信的发送结果待确认，请先查看发件箱，不要重复发送。")
-        // Persist only a digest/marker, never the recipient or private body.
-        pendingKey?.let { store.put(it, "1") }
+        // Check-and-set spans services sharing the application's store. Store
+        // only the intent digest and POST phase, never recipient or private body.
+        if (pendingKey != null) {
+            val existing = synchronized(store) { store.get(pendingKey) }
+            if (existing != null && existing != "preparing") {
+                return@withLock SubmitResult.Uncertain("这封私信的发送结果待确认，请先查看发件箱，不要重复发送。")
+            }
+            // A preparing marker is created by an older version before its
+            // read-only baseline GET. It is safe to clear: that version could
+            // not issue POST before changing the phase to sending.
+            if (existing == "preparing") synchronized(store) {
+                if (store.get(pendingKey) == "preparing") store.remove(pendingKey)
+            }
+        }
+        val previousSendboxUrls = if (pendingKey != null) {
+            val baseline = try {
+                fetch("$origin/message.php?action=sendbox")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            if (baseline?.authStatus != AuthStatus.AUTHENTICATED || baseline.nativePage?.hasMessageList != true) {
+                return@withLock SubmitResult.Rejected("无法安全读取发件箱作为回执基线，本次未发送；请检查网络后再发起。")
+            }
+            val urls = baseline.nativePage.messages.map { it.url }.toSet()
+            val pendingElsewhere = synchronized(store) {
+                val existing = store.get(pendingKey)
+                if (existing == null || existing == "preparing") {
+                    store.put(pendingKey, "sending")
+                    false
+                } else true
+            }
+            if (pendingElsewhere) return@withLock SubmitResult.Uncertain("这封私信可能已由另一项操作发送，请先查看发件箱，不要重复发送。")
+            urls
+        } else null
         val result = try {
             val raw = raw(form.action, form.fields + values)
             val doc = parser.document(raw.html, raw.url)
             val text = parser.responseMessage(doc)
             val target = parser.refreshTarget(doc)
-            val accepted = when {
-                raw.url.toHttpUrl().pathSegments.lastOrNull() == "read.php" -> raw.url
-                target != null && destination(target).effect == SiteEffect.READ -> target
-                else -> null
-            }
+            val messageResult = if (pendingKey != null) {
+                val alreadySendbox = raw.url.contains("message.php") && raw.url.contains("action=sendbox")
+                val sendbox = try {
+                    if (alreadySendbox) parser.parse(raw.html, raw.url)
+                    else fetch("$origin/message.php?action=sendbox")
+                } catch (e: CancellationException) { throw e
+                } catch (_: Exception) { null }
+                messageSendResult(
+                    title = values[form.titleField].orEmpty(),
+                    recipient = values[form.recipientField].orEmpty(),
+                    sendbox = sendbox,
+                    responseHasEditor = doc.select("textarea").isNotEmpty(),
+                    responseNotice = text,
+                    responseUrl = raw.url,
+                    previousMessageUrls = previousSendboxUrls,
+                )
+            } else null
             when {
-                // A redirect or server-side refresh into a readable thread is
-                // the server's own confirmation; no page copy is inspected.
-                accepted != null -> SubmitResult.Success(accepted, "提交成功")
+                messageResult is MessageSendResult.Confirmed -> SubmitResult.Success(null, "已发送：${messageResult.evidence}")
+                messageResult is MessageSendResult.Rejected -> SubmitResult.Rejected(messageResult.reason)
+                messageResult is MessageSendResult.Uncertain -> SubmitResult.Uncertain(messageResult.reason)
+                raw.url.toHttpUrl().pathSegments.lastOrNull() == "read.php" -> SubmitResult.Success(raw.url, "提交成功")
+                target != null && destination(target).effect == SiteEffect.READ -> SubmitResult.Success(target, "提交成功")
                 doc.select("textarea").isNotEmpty() -> SubmitResult.Rejected(text.ifBlank { "站点未接受提交，请检查内容与权限" })
                 else -> SubmitResult.Uncertain("服务器返回的提交结果无法确认，请到网页核对后再操作。" + text.take(120))
             }
@@ -252,11 +300,12 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         catch (_: IOException) { SubmitResult.Uncertain("网络中断，提交可能已送达。请先到网页核对，不要重复提交。") }
         catch (_: Exception) { SubmitResult.Uncertain("服务器未返回可确认的提交结果。请先到网页核对，不要重复提交。") }
         if (result !is SubmitResult.Uncertain) pendingKey?.let(store::remove)
-        return result
+        result
     }
 
     override suspend fun submitWithFiles(form: EditorForm, values: Map<String, String>, files: List<LocalUpload>): SubmitResult {
         if (files.isEmpty()) return submit(form, values)
+        if (form.recipientField != null) return SubmitResult.Rejected("私信附件协议尚未确认，未发送；请移除附件后再操作")
         require(form.uploadEnabled && files.size <= form.uploadLimit) { "此页面不支持这些附件" }
         require(files.all { it.size <= form.uploadMaxBytes }) { "附件超过站点大小限制" }
         if (form.uploadExtensions.isNotEmpty()) require(files.all { it.name.substringAfterLast('.', "").lowercase() in form.uploadExtensions }) { "附件类型不符合站点限制" }
@@ -329,15 +378,216 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
             val raw = raw(url, followRedirects = false, referer = source, customBody = body)
             val doc = parser.document(raw.html, raw.url)
             val target = raw.redirectUrl ?: parser.refreshTarget(doc)
-            if (target != null && destination(target).effect == SiteEffect.READ) SiteActionResult.Response(fetch(target))
-            else SiteActionResult.Response(parser.parse(raw.html, raw.url))
+            val notice = parser.responseMessage(doc)
+            if (target == null && hasExplicitMutationRejection(notice)) {
+                return SiteActionResult.Rejected(notice.take(240))
+            }
+            val page = if (target != null && destination(target).effect == SiteEffect.READ) fetch(target)
+            else parser.parse(raw.html, raw.url)
+            SiteActionResult.Response(
+                page,
+                uncertainReceipt = "服务器已返回页面，但尚未验证操作的最终状态；请检查当前列表或状态后再决定是否重试。",
+            )
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { SiteActionResult.Uncertain("请求结果无法确认，不会自动重复提交；请刷新后核对。") }
+    }
+
+    private fun hasExplicitMutationRejection(message: String): Boolean {
+        val value = message.replace(Regex("\\s+"), " ").trim()
+        if (value.isBlank()) return false
+        return listOf(
+            "非法操作", "操作失败", "提交失败", "请求失败", "参数错误", "无效操作",
+            "权限不足", "没有权限", "余额不足", "贡献不足", "发送失败", "收件人不存在",
+        ).any { phrase -> value.startsWith(phrase) || value == phrase }
     }
 
     override fun encodedLength(value: String): Int = gbkBytes(value).size
     override fun clearSession() = cookieJar.clear()
     override fun close() { client.dispatcher.cancelAll() }
+
+    override suspend fun uploadAvatar(request: AvatarUploadRequest): AvatarUploadResult = withContext(Dispatchers.IO) {
+        if (!sameOrigin(request.form.sourceUrl) || !sameOrigin(request.form.actionUrl)) {
+            return@withContext AvatarUploadResult.Rejected("头像上传来源不可信")
+        }
+        if (!request.form.multipart || !request.form.actionUrl.contains("profile.php")) {
+            return@withContext AvatarUploadResult.Rejected("头像协议已变化，请刷新资料页")
+        }
+        val file = request.upload
+        if (file.size <= 0 || file.size > 2 * 1024 * 1024) return@withContext AvatarUploadResult.Rejected("头像文件大小无效")
+        val mime = file.mimeType.lowercase()
+        val magicOk = when (mime) {
+            "image/jpeg", "image/jpg" -> file.bytes.size >= 3 && file.bytes[0] == 0xFF.toByte() && file.bytes[1] == 0xD8.toByte()
+            "image/png" -> file.bytes.size >= 8 && file.bytes.copyOfRange(0, 8).contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+            "image/webp" -> file.bytes.size >= 12 && String(file.bytes.copyOfRange(0, 4), Charsets.US_ASCII) == "RIFF" &&
+                String(file.bytes.copyOfRange(8, 12), Charsets.US_ASCII) == "WEBP"
+            else -> false
+        }
+        if (!magicOk) return@withContext AvatarUploadResult.Rejected("只支持 JPG、PNG 或 WebP 图片")
+        if (request.width !in 1..140 || request.height !in 1..200) return@withContext AvatarUploadResult.Rejected("头像尺寸无效")
+        val freshPage = try { fetch(request.form.sourceUrl) } catch (e: CancellationException) { throw e
+        } catch (_: Exception) { null }
+            ?: return@withContext AvatarUploadResult.Rejected("无法重新读取资料页，未上传头像")
+        if (freshPage.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(request.form.sourceUrl, freshPage.url)) {
+            return@withContext AvatarUploadResult.Rejected("资料页登录或来源已变化，未上传头像")
+        }
+        val freshForm = freshPage.nativePage?.forms?.firstOrNull { candidate ->
+            candidate.sourceUrl == request.form.sourceUrl &&
+                candidate.actionUrl == request.form.actionUrl &&
+                candidate.method == "POST" && candidate.multipart &&
+                candidate.fields.map { it.name to it.kind }.toSet() == request.form.fields.map { it.name to it.kind }.toSet() &&
+                candidate.hidden.any { it.name == "facetype" }
+        } ?: return@withContext AvatarUploadResult.Rejected("头像表单已变化，请刷新资料页后再试")
+        val action = "$origin/profile.php?action=ajaxface"
+        val values = mutableListOf<FormValue>()
+        freshForm.hidden.forEach { values.add(it) }
+        var widthSeen = false
+        var heightSeen = false
+        freshForm.fields.filter { it.kind != SiteFieldKind.FILE }.forEach { field ->
+            val value = when (field.name) {
+                "uploadurl[1]" -> request.width.toString()
+                "uploadurl[2]" -> request.height.toString()
+                else -> field.initial.firstOrNull().orEmpty()
+            }
+            values.add(FormValue(field.name, value))
+            if (field.name == "uploadurl[1]") widthSeen = true
+            if (field.name == "uploadurl[2]") heightSeen = true
+        }
+        if (!widthSeen) values.add(FormValue("uploadurl[1]", request.width.toString()))
+        if (!heightSeen) values.add(FormValue("uploadurl[2]", request.height.toString()))
+        return@withContext try {
+            val body = nativeMultipart(values, listOf(FilePart("upload", file)))
+            val response = raw(action, followRedirects = false, referer = freshForm.sourceUrl, customBody = body)
+            avatarUploadResponse(parser.document(response.html, response.url))
+        } catch (e: CancellationException) { throw e
+        } catch (_: IOException) { AvatarUploadResult.Uncertain("连接中断，头像可能已上传。请刷新资料页核对，不要自动重试。")
+        } catch (_: Exception) { AvatarUploadResult.Uncertain("服务器未返回可确认的头像结果。请刷新资料页核对。")
+        }
+    }
+
+    private fun avatarUploadResponse(doc: org.jsoup.nodes.Document): AvatarUploadResult {
+        val script = doc.select("script").joinToString("\n") { it.data() }
+        val call = Regex("facepath\\s*\\(\\s*(['\"])(.*?)\\1\\s*,\\s*(['\"])(.*?)\\3\\s*,\\s*(['\"])(.*?)\\5")
+            .find(script) ?: return if (doc.text().contains("上传成功")) AvatarUploadResult.Uncertain("服务器提示成功，但未返回可核对的头像地址，请刷新资料页")
+            else AvatarUploadResult.Uncertain("服务器未返回可确认的头像结果，请刷新资料页核对")
+        val path = call.groupValues[2].trim()
+        val file = call.groupValues[4].trim()
+        val message = call.groupValues[6].trim()
+        if (message.equals("success", true)) {
+            val avatar = parser.resolve(path.trimEnd('/') + "/" + file, "$origin/profile.php?action=modify").orEmpty()
+            return if (avatar.isNotBlank()) AvatarUploadResult.Uploaded(avatar, "头像已上传；资料页正在刷新")
+            else AvatarUploadResult.Uncertain("上传已返回，但头像地址无法核对，请刷新资料页")
+        }
+        val text = doc.text().take(160)
+        return AvatarUploadResult.Rejected(if (message == "undefined_action") "站点拒绝了此次头像上传（非法操作）" else text.ifBlank { "站点拒绝了此次头像上传" })
+    }
+
+    override suspend fun executeReward(action: RewardAction): RewardExecutionResult = withContext(Dispatchers.IO) {
+        if (!sameOrigin(action.sourceUrl) || !sameOrigin(action.endpoint)) {
+            return@withContext RewardExecutionResult.Rejected("奖励来源不可信")
+        }
+        if (destination(action.sourceUrl).effect != SiteEffect.READ || !sameOrigin(action.readbackUrl) ||
+            !isSamePageList(action.sourceUrl, action.readbackUrl)) {
+            return@withContext RewardExecutionResult.Rejected("奖励来源页面已变化，未执行")
+        }
+        val originalEndpoint = action.endpoint.toHttpUrl()
+        val originalValid = when (action.protocol) {
+            RewardProtocol.AJAX_POST -> action.id == "battle-step" &&
+                action.sourceUrl.toHttpUrl().encodedPath == "/kf_fw_ig_index.php" &&
+                action.readbackUrl == action.sourceUrl && originalEndpoint.encodedPath == "/kf_fw_ig_intel.php" &&
+                originalEndpoint.querySize == 0 && action.method == "POST" &&
+                action.fields.size == 1 && action.fields.map { it.name }.distinct().size == action.fields.size &&
+                action.fields.all { it.name == "safeid" && it.value.matches(Regex("[a-zA-Z0-9]{1,64}")) }
+            RewardProtocol.GET_LINK -> originalEndpoint.encodedPath == "/kf_fw_1wkfb.php" &&
+                action.method == "GET" && action.sourceUrl.toHttpUrl().encodedPath == "/kf_fw_1wkfb.php" &&
+                originalEndpoint.queryParameterNames == setOf("do", "safeid", "ptid") &&
+                originalEndpoint.queryParameterNames.all { originalEndpoint.queryParameterValues(it).size == 1 } &&
+                originalEndpoint.queryParameter("ptid") == action.id.removePrefix("claim:") &&
+                originalEndpoint.queryParameter("do") == "1" &&
+                originalEndpoint.queryParameter("safeid").orEmpty().matches(Regex("[a-zA-Z0-9]{1,64}")) &&
+                originalEndpoint.queryParameter("ptid").orEmpty().matches(Regex("[0-9]{1,20}"))
+        }
+        if (!originalValid) return@withContext RewardExecutionResult.Rejected("奖励协议已变化，未执行")
+        val preparedPage = try { fetch(action.sourceUrl) } catch (e: CancellationException) { throw e
+        } catch (_: Exception) { null }
+            ?: return@withContext RewardExecutionResult.Rejected("无法重新读取奖励页面，本次未执行")
+        if (preparedPage.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(action.sourceUrl, preparedPage.url)) {
+            return@withContext RewardExecutionResult.Rejected("奖励页面登录/来源无法确认，本次未执行")
+        }
+        val prepared = preparedPage.nativePage?.rewards?.firstOrNull { it.id == action.id && it.protocol == action.protocol }
+            ?: return@withContext RewardExecutionResult.Rejected("奖励入口已变化或已处理，本次未执行")
+        if (!sameOrigin(prepared.endpoint) || prepared.sourceUrl != preparedPage.url ||
+            prepared.readbackUrl != action.readbackUrl) {
+            return@withContext RewardExecutionResult.Rejected("奖励协议已变化，本次未执行")
+        }
+        if (action.protocol == RewardProtocol.AJAX_POST) {
+            val endpoint = prepared.endpoint.toHttpUrl()
+            if (prepared.id != "battle-step" || prepared.sourceUrl.toHttpUrl().encodedPath != "/kf_fw_ig_index.php" ||
+                prepared.readbackUrl != prepared.sourceUrl || endpoint.encodedPath != "/kf_fw_ig_intel.php" ||
+                endpoint.querySize != 0 || prepared.method != "POST" ||
+                prepared.fields.size != 1 || prepared.fields.map { it.name }.distinct().size != prepared.fields.size ||
+                prepared.fields.any { it.name != "safeid" } ||
+                prepared.fields.none { it.name == "safeid" && it.value.matches(Regex("[a-zA-Z0-9]{1,64}")) }) {
+                return@withContext RewardExecutionResult.Rejected("奖励战斗协议已变化，未执行")
+            }
+            return@withContext try {
+                val body = gbkFormValues(prepared.fields).toRequestBody("application/x-www-form-urlencoded".toMediaType())
+                val response = raw(prepared.endpoint, referer = prepared.sourceUrl, customBody = body)
+                val text = response.html.trim()
+                when {
+                    text == "no" -> RewardExecutionResult.Rejected("站点未执行本次战斗步骤")
+                    text.isBlank() -> RewardExecutionResult.Uncertain("服务器已接收战斗步骤，但没有返回日志；请刷新角色状态核对")
+                    else -> RewardExecutionResult.Uncertain("战斗步骤已提交；请查看战斗日志和角色状态，客户端不会自动继续")
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) { RewardExecutionResult.Uncertain("战斗步骤结果无法确认，请刷新角色状态；不会自动重试") }
+        }
+        val endpoint = prepared.endpoint.toHttpUrl()
+        if (endpoint.encodedPath != "/kf_fw_1wkfb.php" || action.method != "GET" ||
+            prepared.sourceUrl.toHttpUrl().encodedPath != "/kf_fw_1wkfb.php" ||
+            prepared.readbackUrl != prepared.sourceUrl ||
+            endpoint.queryParameterNames != setOf("do", "safeid", "ptid") ||
+            endpoint.queryParameterNames.any { endpoint.queryParameterValues(it).size != 1 } ||
+            endpoint.queryParameter("ptid") != action.id.removePrefix("claim:") ||
+            endpoint.queryParameter("do") != "1" ||
+            endpoint.queryParameter("safeid").orEmpty().matches(Regex("[a-zA-Z0-9]{1,64}")).not() ||
+            endpoint.queryParameter("ptid").orEmpty().matches(Regex("[0-9]{1,20}")).not()) {
+            return@withContext RewardExecutionResult.Rejected("奖励领取协议已变化，未执行")
+        }
+        try {
+            raw(prepared.endpoint, followRedirects = false, referer = prepared.sourceUrl)
+            val after = try { fetch(prepared.readbackUrl) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                ?: return@withContext RewardExecutionResult.Uncertain("服务器已接收请求，但奖励页面未能读回；请刷新核对，不要重复领取")
+            if (after.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(prepared.readbackUrl, after.url)) {
+                return@withContext RewardExecutionResult.Uncertain("服务器已接收请求，但奖励页面登录/来源状态无法确认；请刷新核对，不要重复领取")
+            }
+            val ptid = endpoint.queryParameter("ptid")
+            val status = after.nativePage?.statusTimeline?.entries?.firstOrNull { entry ->
+                Regex("[?&]tid=([0-9]+)").find(entry.relatedUrl)?.groupValues?.get(1) == ptid
+            }?.status
+            return@withContext when (status) {
+                StatusKind.COMPLETED -> RewardExecutionResult.Confirmed("站点已将对应奖励记录标记为完成")
+                StatusKind.FAILED, StatusKind.EXPIRED -> RewardExecutionResult.Uncertain("对应记录显示${if (status == StatusKind.EXPIRED) "已过期" else "失败"}，但无法证明本次请求是否执行；请检查记录后再决定下一步。")
+                StatusKind.AVAILABLE -> RewardExecutionResult.Uncertain("奖励入口仍可领取；服务器是否已处理无法确认，请先核对，不要重复请求")
+                StatusKind.WAITING, StatusKind.UNKNOWN, null -> RewardExecutionResult.Uncertain("奖励页面未提供明确的领取完成状态；请刷新核对，不要重复领取")
+            }
+        } catch (e: CancellationException) { throw e
+        } catch (_: Exception) { RewardExecutionResult.Uncertain("奖励请求结果无法确认；请刷新奖励页面，不会自动重试") }
+    }
+
+    override suspend fun gugu(): GuguSnapshot? = withContext(Dispatchers.IO) {
+        val loginUrl = try {
+            // The forum issues an official, signed redirect for the external
+            // game. The redirect is validated and no forum cookie is sent to it.
+            client.newCall(Request.Builder().url(resolve("fyg_sjcdwj.php?go=play&xl=2"))
+                .header("User-Agent", "KFMobile/0.1 (Android; native client)").header("Referer", "$origin/")
+                .header("Accept", "text/html").build()).execute().use { response ->
+                if (response.code !in listOf(301, 302, 303, 307, 308)) return@withContext null
+                response.header("Location")
+            }
+        } catch (_: Exception) { null } ?: return@withContext null
+        GuguProtocol().load(loginUrl)
+    }
+
 
     override suspend fun purchase(offer: PurchaseOffer): PurchaseResult = purchaseMutex.withLock {
         require(sameOrigin(offer.threadUrl) && sameOrigin(offer.actionUrl)) { "已阻止跨域购买" }

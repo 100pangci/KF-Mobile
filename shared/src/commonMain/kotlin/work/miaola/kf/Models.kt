@@ -70,6 +70,7 @@ data class ForumPost(
     val actions: List<SiteDestination> = emptyList(),
     val replies: List<PostReply> = emptyList(),
     val avatar: String = "",
+    val mentions: List<Mention> = emptyList(),
 )
 
 data class PurchaseOffer(
@@ -186,6 +187,11 @@ interface ForumService {
     suspend fun executeSite(destination: SiteDestination): SiteActionResult = SiteActionResult.Rejected("当前操作尚未适配")
     suspend fun submitWithFiles(form: EditorForm, values: Map<String, String>, files: List<LocalUpload>): SubmitResult =
         if (files.isEmpty()) submit(form, values) else SubmitResult.Rejected("当前服务未接入附件上传")
+    suspend fun executeReward(action: RewardAction): RewardExecutionResult =
+        RewardExecutionResult.Rejected("当前服务未接入奖励协议")
+    suspend fun uploadAvatar(request: AvatarUploadRequest): AvatarUploadResult =
+        AvatarUploadResult.Rejected("当前服务未接入头像上传")
+    suspend fun gugu(): GuguSnapshot? = null
     fun encodedLength(value: String): Int
     fun clearSession()
     fun close()

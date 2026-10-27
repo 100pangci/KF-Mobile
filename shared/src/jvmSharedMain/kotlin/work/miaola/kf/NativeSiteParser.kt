@@ -22,7 +22,11 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val title = when (path) {
             "profile.php" -> when (action) { "modify" -> "修改资料"; "favor" -> "收藏管理"; else -> "会员资料" }
             "message.php" -> when (action) { "read" -> "私信内容"; "banned" -> "屏蔽列表"; "scout" -> "消息跟踪"; "sendbox" -> "发件箱"; else -> "消息管理" }
-            "hack.php" -> "贡献与银行"
+            "hack.php" -> when {
+                action == "log" -> "银行日志"
+                source.queryParameter("H_name") == "bank" -> "贡献与银行"
+                else -> "站点功能"
+            }
             "kf_no1.php" -> "会员排行"
             "kf_growup.php" -> "签到与成长"
             "kf_fw_1wkfb.php" -> "评分与记录"
@@ -89,10 +93,14 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             }
             if (action == "read") {
                 val rows = work.select("tr").toList()
-                val optionIndex = rows.indexOfFirst { row ->
+                val optionIndex = rows.indexOfLast { row ->
                     val cells = row.select("> td")
                     val links = cells.getOrNull(1)?.select("a[href]").orEmpty()
-                    cells.size == 2 && links.isNotEmpty() && links.all { it.attr("href").contains("message.php?action=") }
+                    cells.size == 2 && cells[0].text().trim().trimEnd(':', '：') in setOf("选项", "操作") && links.isNotEmpty() && links.all { a ->
+                        html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl()?.let {
+                            it.encodedPath == "/message.php" && it.queryParameter("action") in setOf("write", "unread", "del", "receivebox", "sendbox", "scout")
+                        } == true
+                    }
                 }
                 if (optionIndex > 0) {
                     val optionRow = rows[optionIndex]
@@ -157,7 +165,10 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             if (label.isBlank() || href.startsWith('#') || href.startsWith("javascript:", true)) return@forEach
             addLink(routes.classify(html.resolve(href, sourceUrl) ?: href, label))
         }
-        val usefulLinks = links.filterNot { link -> path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php") }
+        val usefulLinks = links.filterNot { link ->
+            (path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php")) ||
+                link.url.toHttpUrlOrNull()?.let { it.encodedPath == "/kf_fw_1wkfb.php" && it.queryParameter("do") == "1" } == true
+        }
         val messages = if (path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout")) {
             mainOriginal.select("a[href*='message.php?']").mapNotNull { a ->
                 val target = html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl() ?: return@mapNotNull null
@@ -177,11 +188,33 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             form.fields.singleOrNull { it.name == "banidinfo" && it.kind == SiteFieldKind.MULTILINE }?.let { NativeBlocklist(form.id, it.id) }
         } else null
         val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal) else null
+        val statusTimeline = when {
+            path == "kf_fw_1wkfb.php" -> parseStatusTimeline(mainOriginal, sourceUrl)
+            path == "kf_growup.php" && growth != null -> NativeStatusTimeline("签到与成长", listOf(
+                StatusTimelineEntry(
+                    title = "每日签到",
+                    status = growth.claimStatus,
+                    description = when {
+                        growth.claimStatus == StatusKind.COMPLETED -> "站点已明确标记今日完成"
+                        growth.claimStatus == StatusKind.AVAILABLE -> "站点提供签到入口"
+                        growth.claimStatus == StatusKind.WAITING -> "站点状态为等待处理"
+                        growth.claimStatus == StatusKind.EXPIRED -> "站点明确标记已过期"
+                        growth.claimStatus == StatusKind.FAILED -> "站点明确标记失败"
+                        else -> "站点未提供可判断的状态"
+                    },
+                    action = growth.claimUrl?.let { routes.classify(it, "签到") }?.takeIf { it.effect != SiteEffect.READ },
+                )
+            ))
+            else -> null
+        }
+        val bankLog = if (path == "hack.php" && action == "log") parseBankLog(mainOriginal, sourceUrl) else null
+        val rewards = parseRewardActions(path, mainOriginal, sourceUrl)
         val messageList = path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout") && mainOriginal.select("tr").any { row ->
             row.select(">td,>th").map { it.text().trim() }.containsAll(listOf("标题", "发件人", "收件人"))
         }
         return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth,
-            messages, message, favorites, bank, blocklist, progress, messageList)
+            messages, message, favorites, bank, blocklist, progress, messageList,
+            statusTimeline = statusTimeline, bankLog = bankLog, rewards = rewards)
     }
 
     /**
@@ -459,9 +492,18 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val claimAnchor = status?.selectFirst("a[href]")?.takeIf { !it.attr("href").trim().startsWith("javascript:", true) }
         val claimUrl = claimAnchor?.attr("href")?.let { html.resolve(it, url) }
         val hasClaimForm = status?.selectFirst("form") != null
-        val claimed = status != null && claimUrl == null && !hasClaimForm
+        val statusText = status?.text().orEmpty()
+        val claimed = Regex("已签到|已领取|今日完成|已完成").containsMatchIn(statusText)
+        val claimStatus = when {
+            claimed -> StatusKind.COMPLETED
+            claimUrl != null || hasClaimForm -> StatusKind.AVAILABLE
+            Regex("已过期|过期").containsMatchIn(statusText) -> StatusKind.EXPIRED
+            Regex("失败|未通过").containsMatchIn(statusText) -> StatusKind.FAILED
+            Regex("待处理|等待").containsMatchIn(statusText) -> StatusKind.WAITING
+            else -> StatusKind.UNKNOWN
+        }
         if (level.isBlank() && coefficient.isBlank() && experience.isBlank() && colors.isEmpty()) return null
-        return NativeGrowth(level, coefficient, experience, progress, colors, claimed, claimUrl, hasClaimForm)
+        return NativeGrowth(level, coefficient, experience, progress, colors, claimed, claimUrl, hasClaimForm, claimStatus)
     }
 
     private fun parseProfile(main: Element, url: String): NativeProfile? {
@@ -540,13 +582,148 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         // Do not derive eligibility, thresholds or timelines from prose/rules.
         val score = main.select("span,b,strong").firstOrNull { element ->
             element.text().trim().matches(Regex("[-+]?[0-9]+(?:\\.[0-9]+)?")) &&
-                Regex("当前进度分\\s*[：:]?\\s*$").containsMatchIn(
-                    generateSequence(element.previousSibling()) { it.previousSibling() }.toList().asReversed().joinToString("") { node ->
-                        if (node is TextNode) node.text() else " "
-                    })
+                Regex("\\s*当前进度分\\s*[：:]?\\s*").matches(
+                    generateSequence(element.previousSibling()) { it.previousSibling() }.takeWhile { it is TextNode }
+                        .toList().asReversed().joinToString("") { (it as TextNode).text() })
         } ?: return null
-        val status = main.select("span,b,strong").map { it.text().trim() }.filter { it in setOf("已完成", "未完成", "已领取", "未领取") }.distinct()
-        return NativeProgress(listOf(NativeInfo("当前进度分", score.text().trim())), status)
+        // No normal status/timeline template has been verified. These words
+        // can also appear as examples in rules; keep them in fallback prose,
+        // never promote them to account eligibility or reward state.
+        return NativeProgress(listOf(NativeInfo("当前进度分", score.text().trim())))
+    }
+
+    private fun parseStatusTimeline(main: Element, sourceUrl: String): NativeStatusTimeline? {
+        val entries = mutableListOf<StatusTimelineEntry>()
+        main.select("tr").forEach { row ->
+            val cells = row.select("> td, > th")
+            if (cells.size < 3) return@forEach
+            val time = cells[0].text().trim()
+            if (!time.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\\s+[0-9]{2}:[0-9]{2})?"))) return@forEach
+            val link = cells[1].selectFirst("a[href]")
+            val title = link?.text()?.trim().orEmpty().ifBlank { cells[1].text().trim().take(120) }
+            if (title.isBlank()) return@forEach
+            val rowText = cells.drop(2).joinToString(" · ") { it.text().trim() }
+            val allLinks = row.select("a[href]").mapNotNull { a ->
+                val href = html.resolve(a.attr("href"), sourceUrl) ?: return@mapNotNull null
+                val label = a.text().trim().take(40)
+                if (label.isBlank() || label == title) null else routes.classify(href, label)
+            }.distinctBy { it.url }
+            val action = allLinks.firstOrNull { it.url.contains("kf_fw_1wkfb.php?do=1") }
+                ?: allLinks.firstOrNull { it.url.contains("kf_fw_1wkfb.php?do=2") }
+                ?: allLinks.firstOrNull { it.effect == SiteEffect.CHANGE }
+            val status = when {
+                rowText.contains("已完成") || rowText.contains("已领取") -> StatusKind.COMPLETED
+                rowText.contains("已过期") || rowText.contains("过期") -> StatusKind.EXPIRED
+                rowText.contains("失败") || rowText.contains("未通过") || rowText.contains("驳回") -> StatusKind.FAILED
+                rowText.contains("待检查") || rowText.contains("待审核") || rowText.contains("待处理") -> StatusKind.WAITING
+                action?.url?.contains("kf_fw_1wkfb.php?do=1") == true || rowText.contains("可领取") -> StatusKind.AVAILABLE
+                else -> StatusKind.UNKNOWN
+            }
+            val related = link?.let { a -> html.resolve(a.attr("href"), sourceUrl) }.orEmpty()
+            entries.add(StatusTimelineEntry(title, status, time, rowText, related, action))
+        }
+        val distinct = entries.distinctBy { it.time to it.title to it.status }.take(100)
+        return if (distinct.isEmpty()) null else NativeStatusTimeline("评分与奖励记录", distinct)
+    }
+
+    private fun parseBankLog(main: Element, sourceUrl: String): NativeBankLog {
+        val table = main.selectFirst("table.bank1")
+        val entries = mutableListOf<NativeBankLogEntry>()
+        val unparsed = mutableListOf<List<String>>()
+        val links = mutableListOf<SiteDestination>()
+        val incoming = runCatching { sourceUrl.toHttpUrl().queryParameter("to") == "1" }.getOrDefault(false)
+        table?.select("a[href]")?.forEach { a ->
+            html.resolve(a.attr("href"), sourceUrl)?.let { routes.classify(it, a.text()) }?.let(links::add)
+        }
+        table?.select("tr")?.forEach { row ->
+            val cells = row.select("> td, > th")
+            if (cells.size < 4) return@forEach
+            val id = cells[0].text().trim()
+            val type = cells[1].text().trim()
+            val time = cells[3].text().trim()
+            if (id == "ID") return@forEach
+            if (!time.matches(Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\\s+[0-9]{2}:[0-9]{2})?"))) {
+                if (cells.any { it.text().isNotBlank() } && cells.size >= 5) unparsed.add(cells.take(5).map { it.text().trim() })
+                return@forEach
+            }
+            val descriptionCell = cells[2]
+            val bold = descriptionCell.select("b").map { it.text().trim() }.filter { it.isNotBlank() }
+            val plain = descriptionCell.clone().apply { select("b").remove() }.wholeText()
+            val amountMatch = Regex("金额\\s*[：:]\\s*([0-9]+(?:\\.[0-9]+)?)\\s*([^，,。\\s]*)").find(plain)
+            val memo = Regex("附言\\s*[：:]\\s*(.*)").find(plain)?.groupValues?.get(1)?.trim().orEmpty()
+            val transfer = type.contains("转帐") || type.contains("转账")
+            val direction = when {
+                !transfer -> BankDirection.UNKNOWN
+                incoming -> BankDirection.IN
+                else -> BankDirection.OUT
+            }
+            val counterparty = when (direction) {
+                BankDirection.IN -> bold.firstOrNull().orEmpty()
+                BankDirection.OUT -> bold.getOrNull(1).orEmpty()
+                BankDirection.UNKNOWN -> ""
+            }
+            entries.add(NativeBankLogEntry(
+                id = id,
+                time = time,
+                type = type,
+                direction = direction,
+                counterparty = counterparty,
+                amount = amountMatch?.groupValues?.get(1).orEmpty(),
+                currency = amountMatch?.groupValues?.get(2)?.trim().orEmpty(),
+                memo = memo,
+                description = descriptionCell.wholeText().replace(Regex("\\s+"), " ").trim().take(500),
+            ))
+        }
+        return NativeBankLog(
+            label = if (incoming) "收到的转账（只读）" else "我的转账记录（只读）",
+            entries = entries.take(100),
+            unparsedRows = unparsed.take(20),
+            links = links.distinctBy { it.url },
+        )
+    }
+
+    private fun parseRewardActions(path: String, main: Element, sourceUrl: String): List<RewardAction> {
+        val result = mutableListOf<RewardAction>()
+        if (path == "kf_fw_1wkfb.php") {
+            main.select("a[href]").forEach { a ->
+                val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
+                val url = target.toHttpUrlOrNull() ?: return@forEach
+                if (url.encodedPath != "/kf_fw_1wkfb.php" || url.queryParameter("do") != "1" ||
+                    url.queryParameterNames != setOf("do", "safeid", "ptid") ||
+                    url.queryParameterNames.any { url.queryParameterValues(it).size != 1 }) return@forEach
+                val safeid = url.queryParameter("safeid").orEmpty()
+                val ptid = url.queryParameter("ptid").orEmpty()
+                if (!safeid.matches(Regex("[a-zA-Z0-9]{1,64}")) || !ptid.matches(Regex("[0-9]{1,20}"))) return@forEach
+                result.add(RewardAction(
+                    id = "claim:$ptid",
+                    title = a.text().trim().take(80).ifBlank { "获取评分奖励" },
+                    protocol = RewardProtocol.GET_LINK,
+                    endpoint = target,
+                    method = "GET",
+                    fields = emptyList(),
+                    sourceUrl = sourceUrl,
+                ))
+            }
+        }
+        if (path == "kf_fw_ig_index.php") {
+            val safeid = Regex("data\\s*:\\s*['\"]safeid=([a-zA-Z0-9]{1,64})['\"]").find(main.outerHtml())
+                ?.groupValues?.get(1)
+                ?: main.selectFirst("input[name=safeid]")?.attr("value")?.takeIf { it.matches(Regex("[a-zA-Z0-9]{1,64}")) }
+            if (safeid != null && main.selectFirst("button[onclick*=jgjg]") != null) {
+                // The site implements "until end" as a client-side setTimeout
+                // loop. Only expose one server step; never auto-repeat.
+                result.add(RewardAction(
+                    id = "battle-step",
+                    title = "战斗（前进一层楼）",
+                    protocol = RewardProtocol.AJAX_POST,
+                    endpoint = "$origin/kf_fw_ig_intel.php",
+                    method = "POST",
+                    fields = listOf(FormValue("safeid", safeid)),
+                    sourceUrl = sourceUrl,
+                ))
+            }
+        }
+        return result
     }
 
     private fun parseForm(form: Element, url: String, id: String, pageTitle: String): SiteForm? {

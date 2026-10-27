@@ -20,6 +20,7 @@ enum class KfDestinationKind {
     LOGIN,
     EDITOR,
     NATIVE,
+    GUGU,
 }
 
 val KfDestinationKind.isTopLevel: Boolean
@@ -77,6 +78,7 @@ object KfDestinations {
             path == "message.php" -> KfDestinationKind.MESSAGES
             path == "profile.php" && action == "favor" -> KfDestinationKind.LISTING
             path == "profile.php" -> KfDestinationKind.PROFILE
+            path == "fyg_sjcdwj.php" -> KfDestinationKind.GUGU
             path == "login.php" -> KfDestinationKind.LOGIN
             else -> KfDestinationKind.NATIVE
         }

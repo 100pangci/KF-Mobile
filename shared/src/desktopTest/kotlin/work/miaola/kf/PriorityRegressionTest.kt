@@ -57,6 +57,14 @@ class PriorityRegressionTest {
         assertEquals(1, faq.tables.single().rows.first().last().actions.size)
     }
 
+    @Test fun progressRuleExamplesAreNotPromotedToAccountStatusOrScore() {
+        val native = parser.parse(main("<div>当前进度分：<span>12</span></div><p>规则示例：<b>已完成</b> / <span>未领取</span></p>"), "$origin/kf_lv200.php").nativePage!!
+        assertEquals("12", native.progress!!.stats.single().value)
+        assertTrue(native.progress.status.isEmpty())
+        assertTrue(native.sections.any { it.html.contains("已完成") && it.html.contains("未领取") })
+        assertNull(parser.parse(main("<p>规则示例：当前进度分：<span>200</span></p>"), "$origin/kf_lv200.php").nativePage!!.progress)
+    }
+
     @Test fun messageLinksAreParameterOrderIndependentAndEmptyTrackingStillHasListSemantics() {
         val header = "<tr><th>ID</th><th>标题</th><th>发件人</th><th>收件人</th><th>时间</th><th>已读</th></tr>"
         val page = parser.parse(main("<table>$header<tr><td>1</td><td><a href='message.php?mid=1&amp;action=read'>示例消息</a></td><td>示例发件人</td><td>示例收件人</td><td>2026-01-01</td><td>否</td></tr></table>"), "$origin/message.php")
@@ -149,7 +157,14 @@ class PriorityRegressionTest {
 
     @Test fun uncertainMessageIsBlockedEvenAfterRecreatingServiceAndChangingHiddenTokens() = runBlocking {
         val store = MemoryStore(); var writes = 0
-        val transport = Interceptor { writes++; throw java.io.IOException("offline") }
+        val transport = Interceptor { chain ->
+            if (chain.request().method == "GET") return@Interceptor Response.Builder().request(chain.request())
+                .protocol(Protocol.HTTP_1_1).code(200).message("test")
+                .body(("<div id='kf_topuser'>合成</div><div id='kf_information'><a href='login.php?action=quit'>退出</a></div>" +
+                    "<div class='dcol' style='width:900px'><table><tr><th>ID</th><th>标题</th><th>发件人</th><th>收件人</th><th>时间</th><th>已读</th></tr></table></div>")
+                    .toResponseBody()).build()
+            writes++; throw java.io.IOException("offline")
+        }
         val form = EditorForm("$origin/message.php?action=write", "$origin/message.php", mapOf("verify" to "old-synthetic"), "msg_title", recipientField = "pwuser")
         val values = mapOf("pwuser" to "示例收件人", "msg_title" to "示例标题", "atc_content" to "示例正文")
         val first = HttpForumService(origin, store, transport)
@@ -214,11 +229,14 @@ class PriorityRegressionTest {
         }
     }
 
-    @Test fun unverifiedTrackingDetailsAndBankLogsStillRequireManualVerification() {
-        listOf("message.php?action=readscout&mid=1", "hack.php?H_name=bank&action=log", "hack.php?H_name=bank&action=log&to=1").forEach { route ->
+    @Test fun unverifiedTrackingDetailsAndBankMutationsStillRequireManualVerification() {
+        listOf("message.php?action=readscout&mid=1", "hack.php?H_name=bank&action=virement",
+            "hack.php?H_name=bank&action=log&to=2").forEach { route ->
             assertEquals(SiteEffect.CHANGE, SiteRoutePolicy(origin).classify(route).effect)
             assertFalse(AuditReadPolicy(origin).allows(route))
         }
+        assertTrue(AuditReadPolicy(origin).allows("hack.php?H_name=bank&action=log"))
+        assertTrue(AuditReadPolicy(origin).allows("hack.php?H_name=bank&action=log&to=1"))
     }
 
     @Test fun explicitlyConfirmedTrackingDetailDoesNotPretendToBeADeletionReceipt() = runTest {

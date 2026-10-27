@@ -54,3 +54,25 @@
 - 消息/收藏选择按来源页及 option 值隔离，已加载页可切换；一次只 fresh-revalidate 并提交一页。任一选择失效就拒绝写请求，提交后重新加载并清除旧页边界/选择，不自动循环删除。
 - 私信未知提交增加网络层摘要标记，跨编辑器/服务重建阻止相同内容直接重发；核对入口指向发件箱。没有自动消歧/解除标记流程，仍需协议调查。
 - 本次无 Android 设备，IME、触摸、predictive back、旋转/进程死亡和图库手势依然未验收；不要将合成或私有 capture 的 JVM 渲染写成真机通过。
+
+## P1/P2 收尾（2026-10-26，`30118c5` 之后）
+
+本轮不重做页面，只补状态与事务语义。实现以源码为准；下面的“完成”均指离线/合成或真实只读证据，不等于真实副作用操作已执行。
+
+- **进程恢复**：新增加密 `RecoveryStore`，只保存可重建的 destination、origin、列表页 URL、anchor、搜索词和草稿内容。分页最多恢复 6 页（根页 + 5 页），失败即停止，不循环轰炸；状态 3 天、草稿 7 天后失效。草稿不保存隐藏字段、verify/safeid、密码、银行/购买表单；附件只保留名称/MIME/大小/slot，本进程重启后明确提示重新选择，不保存 bytes。
+- **@ 结构**：`ForumPost.mentions` 只从同源 `profile.php/show.php` 的 `uid` 链接中提取；邮箱和普通文本 `@` 不误判。正文中的 `@用户名` 在发送时合并到站点的 `diy_guanjianci` 关键词字段（站点真实 @ 提醒机制），不发明 BBCode。Reader 的资料链接仍走原生 RichText 点击。
+- **状态时间线**：新增 `StatusKind`/`StatusTimelineEntry`/`NativeStatusTimeline`。评分奖励只按页面上明确的“已完成/待检查/可领取/失败/过期”显示，无法判断一律 `UNKNOWN`；成长只按 claimed/claim 入口显示。没有正常结构时不伪造 timeline。
+- **私信回执**：发送前读取发件箱作为基线；只有 POST 后发件箱出现**新的**标题+收件人匹配行才 `Confirmed`。编辑器回显+明确拒绝文本才 `Rejected`；其余（包括 HTTP 200、普通跳转、发件箱无新行）为 `Uncertain`。发送前有收件人确认对话框，Success 文案不声称 UID。
+- **跨页事务**：`BatchTransactionItem`/`BatchItemResult`/`BatchTransactionResult`；按来源页逐页 fresh revalidation，删除后按“选项是否仍存在”逐项判定成功/失败。任一页返回未知就停止后续页并标 `NOT_ATTEMPTED`，不自动重放。写入前持久化 pending marker，进程死亡后启动只标核对、不重放。移动收藏因无法从列表证明目标分类，逐项返回 `Uncertain`，不伪装完全成功。
+- **银行日志**：`hack.php?H_name=bank&action=log` 与 `&to=1` 加入只读路由；新增 `NativeBankLog`。只按表格列解析时间/类型/描述/日期，金额方向只由 `to=1` 与转帐类型决定；未提供对方或金额时留空，不根据余额变化推断交易成功。UI 与余额分开展示。
+- **奖励协议**：评分奖励的 `do=1&safeid&ptid` GET 入口以及 `kf_fw_ig_intel.php` 的单步 POST `safeid` 进入 `RewardAction`；不实现“前进至结束”的客户端循环。领取后重新读页面，入口消失才 `Confirmed`；战斗步骤返回任意日志只报 `Uncertain`，不报胜利或奖励成功。
+- **ajaxface**：独立 `AvatarUploadRequest`/`AvatarUploadResult`，使用 Android Photo Picker、本机中心裁剪为 140×200 JPG、MIME/magic/size 校验、multipart `profile.php?action=ajaxface`，解析真实 `facepath(...,'success',...)` 回调。上传结果不被当作资料表单保存；若站点要求再保存，UI 明确提示。失败分 Invalid/Rejected/Uncertain，未知不自动重试。
+- **咕咕镇**：使用独立游戏域和独立 CookieJar，论坛 Cookie 不转发；从站点签发的 302 进入游戏，只读 `fyg_index.php`、`fyg_beach.php`、`fyg_read.php` 的 f=6/7/8 列表。Native `GuguScreen` 展示角色/段位/等级/贝壳/冷却/装备/背包，不提供战斗、使用道具、商店或 WebView。
+- **图库手势**：`GalleryGesturePolicy` 统一仲裁。scale≈1（±0.02）、单指、纵向比例 > 1.15 才进入 dismiss；缩放/拖动/横向 pager 优先；距离 > 高度 22% 或速度 > 1100px/s 且超过 6% 距离才关闭，否则 spring 回中并恢复 chrome。仅策略有离线测试，真机触摸仍未验收。
+- **事务边界复核**：HTTP 2xx/redirect 对普通 mutation 只作为页面回执并标 `uncertainReceipt`；收藏需读回相反操作链接；签到需明确完成状态；奖励需匹配项目的明确 completed 状态。通用 HTTP 200 不直接等价于业务成功。
+- **取消/进程死亡**：跨页批量 pending marker 在 coroutine cancellation / Activity close 时保留；重启只要求只读核对，不自动重放。单页管理核对来源加入加密恢复 state，logout 不清理未知回执。
+- **私信发送前基线**：必须先读取已认证、结构可识别的发件箱；读不出则 POST 不发出并清理 marker。只有 baseline 成功才切换 `sending` marker 并提交；POST 阶段取消保留保护。
+- **头像两阶段边界**：上传前重读并复核 profile multipart form；上传 callback 成功不直接等同 Profile 保存成功，需再读 Profile 并匹配头像 URL，否则显示“已上传但最终保存未确认”。
+- **图库下滑方向**：只有向下 drag/向下速度触发 dismiss，向上 fling 不关闭；拖动内容整体位移并轻微缩小，背景 alpha 同步降低。
+
+> 旧“P1 续办”中关于“银行日志仍 CHANGE、进程恢复未实现、私信回执 adapter 不存在”的限制已被上节取代；保留旧记录时应以其时间点为准。

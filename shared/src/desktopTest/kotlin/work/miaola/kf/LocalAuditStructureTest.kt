@@ -15,7 +15,7 @@ class LocalAuditStructureTest {
         val origin = "https://kf.miaola.work"
         val parser = ForumHtmlParser(origin)
         val policy = AuditReadPolicy(origin)
-        val wanted = setOf("message.php:banned", "message.php:scout", "hack.php", "guanjianci.php", "kf_lv200.php", "kf_fw_ig_index.php")
+        val wanted = setOf("message.php", "message.php:receivebox", "message.php:sendbox", "message.php:read", "message.php:banned", "message.php:scout", "hack.php", "guanjianci.php", "kf_lv200.php", "kf_fw_ig_index.php")
         val labels = setOf("进度分", "当前进度分", "今日进度分", "总进度分", "剩余", "已完成", "未完成", "已领取", "未领取", "banidinfo")
         val entries = manifest.filter { it.jsonObject["page_type"]?.jsonPrimitive?.content in wanted }.map { entry ->
             val type = entry.jsonObject.getValue("page_type").jsonPrimitive.content
@@ -41,6 +41,24 @@ class LocalAuditStructureTest {
                 }) }))
                 put("known_labels", JsonArray(labels.filter { main.text().contains(it) }.map(::JsonPrimitive)))
                 put("progress_stats", native.progress?.stats?.size ?: 0)
+                put("message_count", native.messages.size)
+                put("message_unread_count", native.messages.count { it.unread })
+                put("message_sender_count", native.messages.count { it.sender.isNotBlank() })
+                put("message_recipient_count", native.messages.count { it.recipient.isNotBlank() })
+                put("message_time_count", native.messages.count { it.time.isNotBlank() })
+                put("message_person_link_count", native.messages.count { it.personUrl.isNotBlank() })
+                val readMarkers = setOf("是", "否", "已读", "未读", "已阅读", "未阅读")
+                put("read_state_rows", main.select("tr").count { row ->
+                    val cells = row.select(">td")
+                    cells.size >= 6 && cells[5].text().trim() in readMarkers ||
+                        type == "message.php:scout" && cells.size >= 7 && cells[6].text().trim() in readMarkers
+                })
+                put("message_detail", native.message != null)
+                put("message_reply", native.message?.reply != null)
+                put("participant_labels", JsonArray(setOf("发件人", "收件人", "标题", "时间", "内容", "选项").filter { label ->
+                    main.select("tr").any { row -> row.select(">td,>th").firstOrNull()?.text()?.trim()?.trimEnd(':', '：') == label }
+                }.map(::JsonPrimitive)))
+                put("mentions_record_tables", if (type == "guanjianci.php") native.tables.count { it.records().isNotEmpty() } else 0)
                 if (type == "kf_lv200.php") put("score_template", JsonArray(main.select("span,b,strong").filter { it.text().trim().matches(Regex("[-+]?[0-9]+(?:\\.[0-9]+)?")) }.map { el -> buildJsonObject {
                     val before = el.previousSibling()?.toString().orEmpty()
                     put("preceded_by_label", before.contains("当前进度分"))

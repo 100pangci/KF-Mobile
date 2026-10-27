@@ -39,7 +39,7 @@
 | 主题列表 | 专用 topics + boardFilters | ListingScreen + 筛选 BottomSheet | 高 | 分类入口来自实际同板块 READ 链接；保留板规 fallback | P0 |
 | Reader | 专用 posts / quote / purchase / metadata | ReaderScreen | 高 | 连续页保留、重复保护已有回归；长作者名省略 | P0 |
 | 搜索 | 专用结果 Parser / service.search | SearchScreen | 高（UI）；真实查询未测 | GET 入口跳转，搜索签发需要 POST，本轮不执行；离线测结果/筛选/编码/分页 | P0 |
-| 发主题 / 回复 / 引用 | 专用 EditorForm | EditorScreen | 高 | 已 GET 检查真实入口；部分样本受页面权限限制，发布未测 | P0 |
+| 发主题 / 回复 / 引用 | 专用 EditorForm | EditorScreen | 高（编辑 UI） | 已 GET 检查真实入口；发布未测。私信回执没有可信的成功/拒绝协议，发送后保留结果待核对保护；私信附件未支持 | P0/P1 |
 | 收件 / 发件 | 专用 NativeMessageSummary + 兼容 topics | ListingScreen(messages) | 高 | 参与者、时间、未读、首字头像；列表 HTML 不提供正文摘要或真实头像，不虚构 | P1 |
 | 私信详情 | 专用 NativeMessageDetail | MessageDetailScreen | 高 | 阅读正文、发送者、时间、明确回复 CTA；回复发送未测 | P1 |
 | 消息跟踪 | 专用消息摘要 / 空列表标识 | ListingScreen(messages) | 专用 UI，详情部分适配 | 兼容跟踪页额外选择列、空列表；详情 readscout 尚未确认只读，仍为 CHANGE / manual verification required；选择按来源页隔离 | P1 |
@@ -47,13 +47,13 @@
 | 我的 | 专用账号/Profile 摘要 | AccountScreen | 高 | 本地历史、站点入口、设置；不执行签到 | P1 |
 | 用户 Profile | 专用 NativeProfile | ProfileScreen | 高 | 头像、头衔、stats、纵向资料和操作，不再 definition table | P1 |
 | 修改资料 | 标准 SiteForm + 字段分组语义 | ProfileSettingsScreen | 中高 | 基本资料、偏好、安全、独立密码折叠区；保留服务器隐藏字段，不拆造协议 | P1 |
-| 收藏 | 专用 NativeFavorites + SiteForm | FavoritesScreen | 专用 UI，跨页管理部分适配 | 已加载页可独立选择/切换；逐来源页确认提交，不合并令牌；提交后分页边界失效，须重新选择，尚非跨页一次性批量操作 | P1 |
+| 收藏 | 专用 NativeFavorites + SiteForm | FavoritesScreen | 专用 UI，跨页管理部分适配 | 逐来源页确认提交，不合并令牌；写后结果未知或列表读回失败也废弃旧分页并禁止管理，提供只读核对入口。仍非跨页一次性/原子批量操作 | P1 |
 | 阅读历史 | 本机 origin-scoped links | AccountScreen 历史 | 高 | 仅本机保留，不声称全站历史同步 | P1 |
 | 银行 / 贡献 | 专用 NativeBank + SiteForm | BankScreen | 中高 | 余额与规则分离、明确转账/取款入口；当前真实模板没有可用存款表单，不制造按钮；记录仍保守确认 | P1 |
 | 会员排行 | 结构化 NativeTable + NativeRecord | RecordScreen(ranking) | 专用 UI，未知行 fallback | 名次、核心/次要指标、已加载用户名筛选与本人标识；无资料链接不伪造 UID；不完整结构整表保底 | P1 |
 | 评分 / 自助奖励记录 | NativeTable / cell actions + NativeRecord | RecordScreen | 中高 | 手机列表代替宽表；未知表格/新表单仍 fallback；领取动作未测 | P1 |
 | 被 @ 记录 | sections / 可选 records | RecordScreen(status) | 中低 | 本次站点返回非正常记录列表，无法确认正常数据结构；不可宣称完成真实 @ 列表适配 | P1 |
-| 进度分 | NativeProgress 明确 stats/status + 说明 | ProgressScreen；结构缺失时 RecordScreen / fallback | 部分适配（专用数值 UI） | 本次真实模板确认“当前进度分”紧邻数字 span；只提取明确分数/状态，不从规则推导资格或制造 timeline，正常时间线仍未验证 | P1 |
+| 进度分 | NativeProgress 明确分数 + 说明 | ProgressScreen；结构缺失时 RecordScreen / fallback | 部分适配（专用数值 UI） | 仅提取独立“当前进度分”标签紧邻数字的已确认模板；规则中的状态词不提升为账户状态。正常 status/timeline 未验证 | P1 |
 | 签到 / 成长 | 专用 NativeGrowth | GrowthScreen | 高（读取） | 只读取状态；签到、领奖、颜色修改未测试 | P1 |
 | 争夺奖励及动态控件 | 部分 tables / form | NativeSiteScreen | 低，fallback | 存在 toggle、奖励/游戏 Ajax 协议；不得把表单能显示算作完整支持 | P1/P2 |
 | 分享榜 | NativeTable + NativeRecord | RecordScreen | 中高 | 已发现菜单外的同源内容；未知新结构回退 | P1 |
@@ -191,3 +191,83 @@ python -m unittest tools/test_probe_login.py tools/test_package.py
 4. **P1**：银行记录确认只读后再扩 READ；只有站点提供存款入口时再适配；排行榜无用户链接时需要可信的用户定位方案。
 5. **P2**：ajaxface、奖励 Ajax 协议、咕咕镇动态功能；独立只读协议调查和 synthetic fixtures 后再实现，不能靠执行未知脚本探测。
 6. **P2**：图片在 scale=1 时的下滑关闭，须先真机确认与 pinch/pager 无冲突。
+
+## P1 续办（基线 `30118c5`，2026-10-26）
+
+本节只记该提交之后的工作。接管时工作区干净；没有重做或重新认领 BlocklistScreen、ProgressScreen、来源页选择、fresh token、请求版本保护或原有私信摘要标记。未提交、未推送。
+
+### 实际增量
+
+1. **管理操作恢复缺口**：此前只有来源列表读回成功才失效旧分页。现在收到响应、结果未知或异常时都会清除旧选择上下文、废弃尾页和缓存边界；写前提升请求版本，取消不合作的旧续页也不能回填。明确的 fresh-revalidation 拒绝（未写）不清除其它页的选择上下文。
+2. **只读恢复 UI**：消息、收藏、屏蔽和通用表单增加“重新加载并核对”。核对前控制层禁止继续管理，保底表单不能绕过；核对必须得到同源、同列表且已认证的可识别列表/名单结构，失败、登录墙或异常响应不解锁。只读取原来源，不重放写请求，不自动循环处理下一页。读回成功只提示核对结果，不把任意服务器响应改写成成功。
+3. **fresh revalidation 补边界**：增加来源、提交选项、重复 checkbox 值、只读字段变化和多选降单选的保守检查；不合并字段 ID、隐藏令牌或来自不同页的选择。此前已有的 fresh token 和任一选择失效整次拒绝逻辑继续保留。
+4. **私信未知结果保护补洞**：摘要检查/写标记串行化，并在共享 store 上原子检查设置，防止同服务或共用 store 的两个服务并发重复发送。普通 READ 跳转（包括发件箱入口）及 textarea 回显不再被当成可靠成功/明确拒绝；没有真实回执协议证据时保留未知标记。取消也保留标记。未确认的私信附件在发请求前拒绝，不能绕过摘要链路。**代价是目前实际私信发送后的普通回执都会保持待核对，不能保证自动恢复发送。** 没有清除标记按钮，没有自动消歧协议，手动看过发件箱也不会自动解锁。
+5. **消息详情**：操作行与回复入口改按路径/action 语义识别，兼容查询参数重排；正文含消息链接不再抢占后面的操作行。参与者和已读状态仍按站点实际结构，不推测读取产生的状态变化。
+6. **进度规则误当状态**：原来的整页 span/b 状态词扫描会把规则示例中的“已完成/未领取”提升为账户状态。删除这个无正常模板证据的推断，仅保留已确认的独立标签邻接数值；状态词完整留在说明/fallback，不制造资格或时间线。
+
+### 真实只读证据与未完成项
+
+- 复用既有 Cookie、Kotlin Parser 和 audit；根目录无 `cookie.txt`，使用已有 `.secrets/<host>.cookies.txt`。没有密码读取、登录 probe、搜索 POST、脚本执行或任何服务器写操作。
+- 本次 live 仍为 **54 内容样本 / 35 内容视图，55 inventory / 36 类入口**。27 种跳过形态中 CHANGE 24、EXTERNAL 3；与此前 24 种总跳过数不同，不能将它们记为新增支持。原始资料只在 `.secrets/site-audit/`。
+- 已发现并通过 policy 的两条 `guanjianci.php?gjc=<redacted>` 抽样响应均为未认证页面、无记录表、无正常列表结构，不能宣称正常 @ 适配；没有猜测或访问其它未知 @ 协议。
+- 跟踪列表实际 capture 解析出 29 条消息，发送者、收件者、时间和用户链接均非空；结构扫描找到 30 个含已知已读标记的表格行，未读计数 0。普通私信详情的 2 个实际样本都解析出回复入口。回复发送、读取是否改变服务端已读状态均未执行验证。
+- `readscout` 仍只有跟踪列表入口证据，详情未访问；银行日志仍只有 `action=log` 链接。**READ 白名单与 UI 风险确认均未放宽**，两者仍 CHANGE / manual verification required。
+- 进度仍只验证明确分数，正常 status/timeline 没有证据；奖励普通表单与 Ajax 分开，Ajax 未支持；银行仍只有真实转账/取款表单，不添加存款按钮；排行无资料链接不制造 UID。
+- 本轮完善的是现有专用页的恢复 UI，不是新增整套专用屏幕。未知结构保留 Generic fallback；正常 @、跟踪详情、进度时间线及奖励 Ajax 仍未完成。
+- 管理恢复限制是进程内的安全核对流程，**不是**跨页事务、逐项部分失败识别或进程死亡后恢复协议。当前仍不恢复已加载内容/分页/编辑器草稿；route 恢复不等于内容恢复。
+
+### 验证
+
+- 新增 **15 项**合成/假服务回归：`ManagementRecoveryTest` 7 项、`MessageReceiptSafetyTest` 7 项、`PriorityRegressionTest` 1 项；扩展既有 `UiEdgeRenderTest` 和私有结构检查。所有删除/移动/发送均仅假服务或本地拦截器。
+- 最终必跑命令通过：JVM **200 项登记 / 194 通过 / 6 项默认跳过，0 failures/errors**；`:androidApp:assembleDebug`、`:androidApp:lintDebug` 通过，lint 0 Error/Fatal、11 Warning；Python 8 项通过，没有运行账号密码 probe。
+- 本地 opt-in 的私有离线渲染/结构/隐私与 P1 回归合跑 **36 项通过，0 跳过/失败**；真实只读 audit 独立运行通过。两个 opt-in 开关均未在 CI 启用，未启用 `KF_LOGIN_TEST`。
+- 私有 capture 仍是 **22 屏 × 4 规格 = 88 张**，不是新增页面覆盖量；PNG 尺寸/CRC 完整性错误数 0，文本/Exif metadata chunk 0。合成边界渲染新增消息/收藏恢复态共 **8 张**（边界目录现为 44 张）；人工查看消息浅色 360dp 和收藏深色 412dp 样例。没有宣称真实 88 张逐屏人工验收，更没有设备手势通过结论。
+- 最终隐私扫描覆盖 83 个公开文本文件，认证 Cookie、令牌、账号/邮箱/私信、余额、实际长标识等匹配文件 0，私有文件被 Git 跟踪数 0，inventory query 值脱敏错误数 0；13 个非认证皮肤偏好词碰撞单列，不输出原值。`git status`、`git diff`、`git diff --check` 复查，无空白错误（仅既有 CRLF/LF 规范化提示）。
+- `adb devices` 无连接设备。搜索 focus/IME/sheet、编辑器选区/表情/焦点、predictive back 取消/完成/草稿/提交中、tab 回顶与分区滚动、旋转/进程重建、图库全部仍未完成 Android 设备验收。JVM 渲染不证明这些手势通过。
+- 未执行：发布、回复、私信发送、删除、标记状态、收藏/移动/新目录、推荐、购买/下载、签到/领奖、资金、资料/密码/屏蔽/头像修改、游戏 mutation、搜索签发。
+
+剩余 P1：Android 设备验收及安全内容/草稿恢复；正常 @ 与进度状态结构证据；私信回执/消歧协议；跨页事务与可证明的逐项部分失败恢复；银行日志只读证据、已存在协议的写操作另行授权实测。P2（ajaxface、奖励 Ajax、动态游戏、scale=1 下滑关闭）继续暂缓。
+
+## P1/P2 收尾复核（2026-10-26）
+
+本节记录 `30118c5` 后的增量，覆盖上方旧的“剩余/暂缓”结论。**没有**执行任何真实副作用；Android 设备仍未连接。
+
+### 实际增量与边界
+
+1. **进程恢复**：`RecoveryStore` 只持久化 destination、origin、列表页 URL、anchor index/offset/key、搜索词、草稿内容和待核对的管理来源页。分页恢复上限 6 页（根页 + 5 页），失败即停，不自动轰炸；分页状态 3 天、草稿 7 天失效。草稿不含隐藏字段、verify/safeid、密码、银行/购买表单；附件仅保存名称/MIME/大小/slot，重启时明确提示重新选择，不保存 bytes。
+2. **@**：`Mention(displayName, profileUrl, uid?)` 与 `ForumPost.mentions` 已落地；仅识别同源 profile/show 且 `uid` 合法的链接，邮箱/普通文本 `@` 不误判。发送时把正文中的 `@用户名` 合并到站点真实的 `diy_guanjianci` 关键词字段，不发明 BBCode。真实抽样未发现正常 @ 记录表，因此没有声称“真实 @ 列表适配完成”。
+3. **状态时间线**：`StatusKind`/`StatusTimelineEntry`/`NativeStatusTimeline`；评分奖励按明确标签映射，无法判断一律 `UNKNOWN`；成长按 claimed/claim 入口显示。正常进度 status/timeline 仍无真实结构证据，未伪造。
+4. **私信回执**：先读到已认证且结构可识别的发件箱作为基线，才会准备 POST；基线不可读时明确“本次未发送”并清理 marker。POST 前切换到持久化 `sending` marker。POST 后只有出现**新的**标题+收件人匹配行才 `Confirmed`。编辑器回显+明确拒绝词才 `Rejected`；其余为 `Uncertain`。发送前有收件人确认；成功文案不声称 UID。旧 `message_pending` 摘要保护继续有效。
+5. **跨页事务**：新增 `BatchTransactionItem`/`BatchItemResult`/`BatchTransactionResult` 和 pending marker。逐来源页 fresh revalidation；删除按选项是否仍存在逐项判定。任一页 `Uncertain` 停止后续页并标 `NOT_ATTEMPTED`，不重放。收藏移动无法从列表证明目标分类，逐项 `Uncertain`。进程死亡后只标只读核对，不重放。
+6. **银行日志**：`hack.php?H_name=bank&action=log`（以及 `to=1`）列入 READ；新增 `NativeBankLog`/交易记录 UI。只按真实表格列解析；金额方向只由页面 `to=1` 与转帐类型决定，缺失字段留空。余额和日志分开展示；不根据余额变化推断成功。真实只读 GET 已验证日志结构与“我的/对我的”两类记录。
+7. **奖励协议**：真实页面/JS 中评分奖励为 `kf_fw_1wkfb.php?do=1&safeid&ptid` GET；争夺为 `kf_fw_ig_intel.php` POST `safeid`，返回 HTML 日志、失败为 `no`，并存在客户端“前进至结束”循环。Native adapter 只提供一次 GET/单步 POST；领取后必须读回匹配 `ptid` 的 timeline 状态，明确 `completed` 才 Confirmed；行消失/结构缺失/HTTP 200 均不确认。战斗日志只报 Uncertain，不自动循环。
+8. **ajaxface**：真实资料页表单为 multipart `profile.php?action=ajaxface`，提交 `upload` 文件、`uploadurl[1]/[2]`、`facetype`，回调为 `facepath(...,'success',...)`。已实现 Photo Picker、本机中心裁剪 140×200 JPG、magic/MIME/大小校验、上传前 fresh form 复核和独立结果模型；上传后读回 Profile 匹配头像 URL，未匹配时不报资料保存成功。没有执行线上头像修改。
+9. **咕咕镇**：真实入口经站点 302 到 `www.momozhen.com/fyg_login.php?...`，游戏有独立 Cookie。Native 适配使用独立游戏域/CookieJar，不转发论坛 Cookie；只读 `fyg_index.php`、`fyg_beach.php` 和 `fyg_read.php` 的 f=6/7/8 列表。`GuguScreen` 展示角色/冷却/装备/背包；战斗、使用道具、商店、WebView 均未提供。真实 capture 已验证解析，未执行游戏 mutation。
+10. **图库**：`GalleryGesturePolicy` 隔离手势判定；scale≈1、单指、向下纵向比例和距离/向下速度阈值共同决定 dismiss；缩放/横向 pager 优先，向上 fling 不关闭。仅策略测试，无设备触摸验收。
+
+### 验证（本轮）
+
+- `:shared:desktopTest`：边界收尾后 **239 项登记 / 233 通过 / 6 项本地授权测试默认跳过 / 0 failures**。覆盖进程恢复、@、私信 baseline/receipt、跨页部分失败与取消恢复、银行日志、奖励状态读回、头像 fresh form/两阶段读回、咕咕只读 capture、图库上下方向与手势阈值、通用 mutation 2xx 不确认。
+- `:androidApp:assembleDebug` 通过；`:androidApp:lintDebug` 通过，**0 Error/Fatal、12 Warning**（依赖版本/KTX/API 提示，无阻塞）。
+- 真实只读证据：银行日志 GET（`action=log` 与 `to=1`）实际结构；评分奖励页面与实际脚本；资料修改 ajaxface 表单/JS；咕咕镇官方 302、角色页、沙滩与 f=6/7/8 只读列表。所有真实证据只进入 `.secrets/` 私有目录，本文件不含 URL 参数、账号、金额、UID/MID 或图片数据。
+- 未执行：真实私信发送、银行转账/取款、奖励领取、头像上传、战斗/道具/商店、删除/购买、搜索签发。上述结果判定仅由 synthetic/fake service 或真实只读 capture 验证。
+- `adb devices -l` 仍无设备；Android instrumentation/connected test、IME、焦点、predictive back、触摸、旋转、进程死亡设备复现、图库真机手势均未运行。详细人工清单位于 `docs/android-device-checklist.md`。
+- 未恢复：表单字段/隐藏令牌、密码、银行表单、购买确认、附件 bytes、图库缩放/页码、BottomSheet 临时状态、真实消息已读状态、任何服务端回执。分页/草稿只在 origin-scoped 加密 store 中保存；不把 HTML/PageData 全量塞入 Android saved state。
+
+### 边界复核补充
+
+- 通用站点 mutation 的 2xx/redirect 只作为页面回执，带 `uncertainReceipt`，不直接报业务成功；无跳转响应仅在出现强、明确的拒绝短语时归为 `Rejected`。收藏必须重读主题并看到相反操作链接才确认。
+- 跨页事务若 mutation 回执不是来源列表，会对原来源 URL 再做只读 GET；中断/进程死亡保留待核对来源，不重放。删除按逐项选项消失判定；移动目标无法读回证明时保留 Uncertain。
+- 管理页的不确定来源也保存在加密 recovery state；只读核对成功才清除。logout 不丢失待核对标记，换 origin 则按 origin 隔离。
+- 私信发件箱基线不可读时不发送；基线通过后立即持久化 `sending` 阶段。取消发生在发送前没有 marker，发送阶段取消则保留 marker。
+- 成长签到不再因“没有链接/表单”推断已完成；只有明确状态词才是 completed，入口存在才是 available，否则 unknown。
+
+### 边界复核补充
+
+- 通用站点 mutation 的 2xx/redirect 现在只作为页面回执，带 `uncertainReceipt`，不再直接报业务成功；只有无跳转响应以强、明确拒绝短语开头时归为 `Rejected`。收藏必须重读主题并看到相反操作链接才确认。
+- 私信先读取已认证且结构可识别的发件箱，再持久化 `sending` marker 并 POST；发件箱基线读不出时明确“本次未发送”并清理 marker。取消发生在基线 GET 时不会产生发送 marker；POST 阶段取消则保留 marker。
+- 批量事务会读取 mutation response 中的来源列表；若不是来源列表则对原来源 URL 再做只读 GET。逐项删除只按选项消失判成功；移动不以普通列表回执猜目标目录。中断/进程死亡保留 pending source，成功只读核对后才逐页清除。
+- Reward claim 只有匹配 `ptid` 的时间线行明确为 `completed` 才确认；页面结构缺失、行消失或仅 HTTP 200 均不确认。
+- ajaxface 上传前重新 GET profile 表单并比对来源、action、method、multipart、字段结构与 facetype；上传后还要重新读取 Profile 并匹配新头像 URL，匹配不到时只报告“文件已上传，资料页保存未确认”。
+- 成长 claim 不再以“没有链接/表单”推断已领取；只有明确完成文案，或真实 claim 入口存在时才分别标记 completed/available，其余为 unknown。
+- 图库 dismiss 只响应向下 drag / 向下 velocity；向上 fling 不关闭。内容随拖动并缩小，背景 alpha 同步变化。

@@ -191,6 +191,7 @@ class ForumHtmlParser(private val origin: String) {
         val quote = post.selectFirst("a[href*='post.php?action=quote']")?.let { resolve(it.attr("href"), post.baseUri()) }.orEmpty()
         val avatar = post.selectFirst("td[width=190] img.pic, .readidms img.pic")
             ?.let { resolve(it.attr("src"), post.baseUri()) }.orEmpty()
+        val mentions = parseMentions(post)
         clone.select("[id^=floor], script, style").remove()
         header?.remove()
         // The site's <base href="/"> changes Element.baseUri(). Use the actual
@@ -246,8 +247,27 @@ class ForumHtmlParser(private val origin: String) {
             meta = meta,
             actions = actions,
             replies = replies.distinctBy { it.html },
-            avatar = avatar)
+            avatar = avatar,
+            mentions = mentions)
     }
+
+    private fun parseMentions(post: Element): List<Mention> = post.select("a[href]").mapNotNull { a ->
+        val target = resolve(a.attr("href"), post.baseUri()) ?: return@mapNotNull null
+        val url = target.toHttpUrl()
+        val path = url.pathSegments.lastOrNull()
+        if (path !in setOf("profile.php", "show.php")) return@mapNotNull null
+        if (path == "profile.php" && url.queryParameter("action") !in listOf(null, "", "show")) return@mapNotNull null
+        if (url.queryParameter("uid")?.matches(Regex("[0-9]+")) != true) return@mapNotNull null
+        val preceding = buildString {
+            var node = a.previousSibling()
+            var count = 0
+            while (node != null && count < 3) {
+                if (node is org.jsoup.nodes.TextNode) append(node.text())
+                node = node.previousSibling(); count++
+            }
+        }
+        mentionFromAnchor(a.text(), target, preceding)
+    }.distinctBy { it.profileUrl }
 
     private fun purchaseOffer(fieldset: Element, postId: String, threadUrl: String): PurchaseOffer? {
         val legend = fieldset.selectFirst("legend")?.clone() ?: return null

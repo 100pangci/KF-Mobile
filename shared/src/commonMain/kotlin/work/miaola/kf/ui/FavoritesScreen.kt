@@ -39,20 +39,30 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
     var target by remember(directory) { mutableStateOf(directory?.initial?.firstOrNull().orEmpty()) }
     val state = rememberLazyListState()
     ListInteractions(c, state, page, enabled = !managing)
-    fun submit(operation: String) {
-        val current = form ?: return
-        val operationField = job ?: return
-        if (operationField.options.none { it.value == operation }) return
-        val values = current.fields.associate { field -> field.id to when {
-            field.name == "delid[]" -> if (field.id in selected) field.options.map { it.value } else emptyList()
-            field.id == operationField.id -> listOf(operation)
-            field.id == directory?.id -> listOf(target)
+    fun batchRequests(operation: String): List<BatchPageRequest> = sources.mapNotNull { candidate ->
+        val values = selection.values(candidate)
+        if (values.isEmpty()) return@mapNotNull null
+        val jobField = candidate.fields.firstOrNull { it.name == "job" && it.options.any { option -> option.value == operation } }
+            ?: return@mapNotNull null
+        val directoryField = candidate.fields.firstOrNull { it.name == "type" && it.kind == SiteFieldKind.SELECT }
+        val overrides = candidate.fields.associate { field -> field.id to when {
+            field.id == jobField.id -> listOf(operation)
+            field.id == directoryField?.id && operation == "change" -> listOf(target)
             else -> field.initial
         } }
-        c.requestSiteSubmit(current, values, current.submits.first())
+        buildBatchPageRequest(candidate, values, overrides, verifyAbsent = operation == "clear")
+    }
+    fun submit(operation: String) {
+        val operationField = job ?: return
+        if (operationField.options.none { it.value == operation }) return
+        val requests = batchRequests(operation)
+        if (requests.isEmpty() || requests.size != selection.pageCount) {
+            c.reportPlatformResult("所选来源页已变化或无法安全复核，未提交", true)
+        } else c.requestBatchSiteSubmit(requests)
     }
     RefreshableList(timeline, { c.refreshTimeline(page) }, enabled = !managing) {
         LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 100.dp)) {
+            item { ManagementRecovery(c, page.url) }
             item { Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { categories = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.FolderOpen, null); Text(" 收藏分类"); Icon(Icons.Default.ExpandMore, null) }
                 TextButton(onClick = { managing = !managing }, enabled = form != null && !c.siteBusy) { Text(if (managing) "完成" else "管理") }
@@ -76,10 +86,26 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
                 }
                 item { Row(Modifier.padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (job?.options?.any { it.value == "change" } == true && directory != null)
-                        OutlinedButton(onClick = { move = true }, enabled = selected.isNotEmpty() && !c.siteBusy, modifier = Modifier.weight(1f)) { Text("移动分类") }
+                        OutlinedButton(onClick = { move = true }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) { Text("移动分类") }
                     if (job?.options?.any { it.value == "clear" } == true)
-                        Button(onClick = { submit("clear") }, enabled = selected.isNotEmpty() && !c.siteBusy, modifier = Modifier.weight(1f)) { Text("删除") }
+                        Button(onClick = { submit("clear") }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) { Text("删除") }
                 } }
+                if (selection.pageCount > 1) item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        if (job?.options?.any { it.value == "change" } == true && directory != null)
+                            OutlinedButton(onClick = {
+                                val requests = batchRequests("change")
+                                if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少目标分类，未提交", true)
+                                else c.requestBatchSiteSubmit(requests)
+                            }, enabled = !c.siteBusy && !c.batchBusy, modifier = Modifier.weight(1f)) { Text("跨页移动（${selection.pageCount} 页）") }
+                        if (job?.options?.any { it.value == "clear" } == true)
+                            Button(onClick = {
+                                val requests = batchRequests("clear")
+                                if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少删除操作，未提交", true)
+                                else c.requestBatchSiteSubmit(requests)
+                            }, enabled = !c.siteBusy && !c.batchBusy, modifier = Modifier.weight(1f)) { Text("跨页删除（${selection.pageCount} 页）") }
+                    }
+                }
                 if (form != null && (job == null || job.options.any { it.value !in setOf("change", "clear") })) item { NativeFormCard(c, form) }
             } else {
                 val topics = timeline.topics
@@ -107,7 +133,8 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
         LazyColumn(Modifier.heightIn(max = 400.dp)) { items(directory.options, key = { it.value }) { option ->
             ListItem(headlineContent = { Text(option.label) }, leadingContent = { RadioButton(option.value == target, null) }, modifier = Modifier.clickable { target = option.value })
         } }
-        Button(onClick = { move = false; submit("change") }, Modifier.fillMaxWidth().padding(20.dp), enabled = !c.siteBusy) { Text("移动所选") }
+        Button(onClick = { move = false; submit("change") }, Modifier.fillMaxWidth().padding(20.dp),
+            enabled = !c.siteBusy && !c.batchBusy && selection.count > 0 && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }) { Text("移动所选") }
     }
 }
 

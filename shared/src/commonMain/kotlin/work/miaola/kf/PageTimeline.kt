@@ -14,16 +14,19 @@ class PageTimeline(first: PageData) {
     private val visited = mutableSetOf<String>()
     private val topicIds = mutableSetOf<String>()
     private val postIds = mutableSetOf<String>()
+    val loadedPageUrls: List<String> get() = pages.map { it.url }
     var next by mutableStateOf<String?>(null); private set
     var lastUrl: String = first.url; private set
     var loading by mutableStateOf(false); internal set
     var refreshing by mutableStateOf(false); internal set
     var failure by mutableStateOf<String?>(null); internal set
+    var managementStale by mutableStateOf(false); private set
     internal var requestId = 0
 
     init { reset(first) }
 
     fun reset(page: PageData) {
+        managementStale = false
         first = page
         pages.clear(); visited.clear(); topicIds.clear(); postIds.clear()
         topics.clear(); posts.clear(); messages.clear(); nativePages.clear(); failure = null
@@ -39,7 +42,16 @@ class PageTimeline(first: PageData) {
         tail.forEach { append(it, it.url) }
     }
 
-    fun canLoad(url: String) = !loading && !refreshing && url !in visited
+    fun canLoad(url: String) = !managementStale && !loading && !refreshing && url !in visited
+
+    /** Keep the visible root for reading, but never reuse old page boundaries. */
+    fun invalidateManagement() {
+        requestId++
+        loading = false; refreshing = false
+        reset(first)
+        managementStale = true
+        next = null
+    }
 
     fun updatePage(page: PageData) {
         if (first.url.substringBefore('#') == page.url.substringBefore('#')) {

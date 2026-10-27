@@ -37,8 +37,13 @@ class SiteRoutePolicy(private val origin: String) {
             path == "register.php" && url.query.isNullOrBlank() -> SiteEffect.READ
             path == "login.php" && only() -> SiteEffect.READ
             path == "hack.php" && url.queryParameter("H_name") == "bank" && only("H_name") -> SiteEffect.READ
+            path == "hack.php" && url.queryParameter("H_name") == "bank" &&
+                url.queryParameter("action") == "log" && url.queryParameter("to") in listOf(null, "", "0", "1") &&
+                only("H_name", "action", "to", "page") -> SiteEffect.READ
             path in listOf("kf_growup.php", "kf_lv200.php", "kf_fw_1wkfb.php", "kf_fw_ig_index.php") && only("ping", "page", "uid") -> SiteEffect.READ
-            path == "fyg_sjcdwj.php" && only() -> SiteEffect.READ
+            path == "kf_fw_1wkfb.php" && url.queryParameter("do") == "2" &&
+                only("do", "safeid", "id", "ping", "page", "uid") -> SiteEffect.READ
+            path == "fyg_sjcdwj.php" && (only() || (url.queryParameter("go") == "play" && url.queryParameter("xl") in listOf("1", "2") && only("go", "xl"))) -> SiteEffect.READ
             path.isEmpty() && only() -> SiteEffect.READ
             else -> SiteEffect.CHANGE
         }

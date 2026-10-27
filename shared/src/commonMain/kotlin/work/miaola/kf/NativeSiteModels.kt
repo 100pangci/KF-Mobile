@@ -85,6 +85,7 @@ data class NativeGrowth(
     val claimed: Boolean = false,
     val claimUrl: String? = null,
     val claimForm: Boolean = false,
+    val claimStatus: StatusKind = StatusKind.UNKNOWN,
 )
 
 data class NativeSitePage(
@@ -104,6 +105,9 @@ data class NativeSitePage(
     val blocklist: NativeBlocklist? = null,
     val progress: NativeProgress? = null,
     val messageList: Boolean = false,
+    val statusTimeline: NativeStatusTimeline? = null,
+    val bankLog: NativeBankLog? = null,
+    val rewards: List<RewardAction> = emptyList(),
 )
 
 data class NativeMessageSummary(val url: String, val title: String, val sender: String, val recipient: String,

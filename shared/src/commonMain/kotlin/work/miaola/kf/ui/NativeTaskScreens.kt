@@ -2,20 +2,26 @@
 
 package work.miaola.kf.ui
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -27,12 +33,15 @@ internal fun NativeTaskScreen(c: AppController, page: PageData, actions: KfActio
     val native = page.nativePage ?: return false
     val path = page.url.substringBefore('?').substringAfterLast('/')
     when {
+        native.bankLog != null -> BankLogScreen(c, native, actions)
         native.message != null -> MessageDetailScreen(c, native, actions, rich)
         native.blocklist != null -> BlocklistScreen(c, native, actions, rich)
         path == "message.php" && page.url.contains("action=scout") && native.hasMessageList -> ListingScreen(c, actions, page, isMessages = true, rich = rich)
         native.profile != null -> ProfileScreen(c, native, actions, rich, avatar)
-        path == "profile.php" && page.url.contains("action=modify") && native.forms.size == 1 -> ProfileSettingsScreen(c, native, actions, rich)
-        native.bank?.balances?.isNotEmpty() == true -> BankScreen(c, native, actions, rich)
+        path == "profile.php" && page.url.contains("action=modify") && native.forms.size >= 1 -> ProfileSettingsScreen(c, native, actions, rich)
+        native.bank != null -> BankScreen(c, native, actions, rich)
+        native.statusTimeline != null -> StatusTimelineScreen(c, page, native, actions, rich)
+        native.rewards.isNotEmpty() -> RewardScreen(c, page, native, actions, rich)
         native.progress != null -> ProgressScreen(c, page, actions, rich)
         path == "faq.php" -> FaqScreen(c, native, actions, rich)
         path == "kf_no1.php" && native.tables.any { it.records(true).isNotEmpty() } -> RecordScreen(c, page, actions, rich, ranking = true)
@@ -77,16 +86,183 @@ private fun BlocklistScreen(c: AppController, native: NativeSitePage, actions: K
     val field = form.fields.firstOrNull { it.id == model.fieldId } ?: return
     val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
     LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { ManagementRecovery(c, form.sourceUrl) }
         item { Text("屏蔽名单", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         // Keep the site's exact text syntax. No guessed UID/name conversion.
         native.sections.forEach { section -> item { rich(section.html, c.origin, c.fontScale, actions.open, c::showImages) } }
         item { NativeField(c, form, field.copy(label = "屏蔽名单"), values[field.id].orEmpty()) { values[field.id] = it } }
         items(form.fields.filterNot { it.id == field.id }) { other -> NativeField(c, form, other, values[other.id].orEmpty()) { values[other.id] = it } }
         item { Text("保存前会重新核对页面；填写格式以上方站点说明为准。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        form.submits.forEach { submit -> item { Button(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = !c.siteBusy, modifier = Modifier.fillMaxWidth()) {
+        form.submits.forEach { submit -> item { Button(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = !c.siteBusy && c.managementRecoveryFor(form.sourceUrl) == null, modifier = Modifier.fillMaxWidth()) {
             if (c.siteBusy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("保存屏蔽名单")
         } } }
         item { TaskPageExtras(c, native.copy(forms = native.forms.filterNot { it.id == form.id }), actions, rich) }
+    }
+}
+
+@Composable
+private fun StatusTimelineScreen(c: AppController, page: PageData, native: NativeSitePage, actions: KfActions, rich: RichContent) {
+    val timeline = native.statusTimeline ?: return
+    val state = rememberLazyListState()
+    val interactions = ListInteractions(c, state, page)
+    RefreshableList(interactions, { c.refreshTimeline(page) }) {
+        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 100.dp)) {
+            item {
+                Text(timeline.label, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text("状态只按页面明确标签显示；无法判断时标记为“未知”。", Modifier.padding(top = 6.dp),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            itemsIndexed(timeline.entries) { index, entry ->
+                Row(Modifier.fillMaxWidth()) {
+                    Column(Modifier.width(22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(Modifier.padding(top = 7.dp).size(11.dp).clip(CircleShape).background(statusColor(entry.status)))
+                        if (index < timeline.entries.lastIndex) Box(Modifier.width(2.dp).height(54.dp)
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)))
+                    }
+                    Column(Modifier.weight(1f).padding(start = 10.dp, bottom = 18.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(statusLabel(entry.status), style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold, color = statusColor(entry.status))
+                            if (entry.time.isNotBlank()) {
+                                Spacer(Modifier.weight(1f))
+                                Text(entry.time, style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Text(entry.title, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (entry.description.isNotBlank() && !entry.description.contains(entry.title)) {
+                            Text(entry.description, Modifier.padding(top = 3.dp), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (entry.relatedUrl.isNotBlank()) Text("查看相关主题", Modifier.padding(top = 4.dp)
+                            .clickable { actions.open(entry.relatedUrl) }, style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary)
+                        entry.action?.let { action ->
+                            val reward = native.rewards.firstOrNull { it.endpoint == action.url }
+                            TextButton(onClick = { if (reward != null) c.requestReward(reward) else c.openSiteDestination(action) },
+                                enabled = !c.rewardBusy && !c.siteBusy) {
+                                Text(if (reward != null) "查看并领取" else action.title)
+                            }
+                        }
+                    }
+                }
+            }
+            item { TaskPageExtras(c, native.copy(statusTimeline = null), actions, rich) }
+            item { NextPageFooter(c, page, interactions) }
+        }
+    }
+}
+
+private fun statusColor(status: StatusKind) = when (status) {
+    StatusKind.WAITING -> androidx.compose.ui.graphics.Color(0xFFB26A00)
+    StatusKind.AVAILABLE -> androidx.compose.ui.graphics.Color(0xFF1565C0)
+    StatusKind.COMPLETED -> androidx.compose.ui.graphics.Color(0xFF2E7D32)
+    StatusKind.EXPIRED -> androidx.compose.ui.graphics.Color(0xFF757575)
+    StatusKind.FAILED -> androidx.compose.ui.graphics.Color(0xFFC62828)
+    StatusKind.UNKNOWN -> androidx.compose.ui.graphics.Color(0xFF757575)
+}
+
+private fun statusLabel(status: StatusKind) = when (status) {
+    StatusKind.WAITING -> "等待处理"
+    StatusKind.AVAILABLE -> "可领取"
+    StatusKind.COMPLETED -> "已完成"
+    StatusKind.EXPIRED -> "已过期"
+    StatusKind.FAILED -> "失败"
+    StatusKind.UNKNOWN -> "状态未知"
+}
+
+@Composable
+private fun BankLogScreen(c: AppController, native: NativeSitePage, actions: KfActions) {
+    val log = native.bankLog ?: return
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 100.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Text(log.label, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("只读交易记录，不根据余额变化推断某笔交易成功。", Modifier.padding(top = 6.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (log.entries.isEmpty()) item { Text("没有可识别的交易记录。", Modifier.padding(16.dp)) }
+        items(log.entries, key = { "${it.id}:${it.time}:${it.description.hashCode()}" }) { entry ->
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(entry.type.ifBlank { "记录" }, style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text(entry.time, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (entry.amount.isNotBlank()) {
+                        val prefix = when (entry.direction) {
+                            BankDirection.OUT -> "−"
+                            BankDirection.IN -> "+"
+                            BankDirection.UNKNOWN -> ""
+                        }
+                        Text("$prefix${entry.amount} ${entry.currency}".trim(), style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = when (entry.direction) {
+                                BankDirection.OUT -> MaterialTheme.colorScheme.error
+                                BankDirection.IN -> MaterialTheme.colorScheme.primary
+                                BankDirection.UNKNOWN -> MaterialTheme.colorScheme.onSurface
+                            })
+                    }
+                    if (entry.counterparty.isNotBlank()) Text(
+                        when (entry.direction) {
+                            BankDirection.OUT -> "转给 ${entry.counterparty}"
+                            BankDirection.IN -> "来自 ${entry.counterparty}"
+                            BankDirection.UNKNOWN -> entry.counterparty
+                        }, style = MaterialTheme.typography.bodyMedium)
+                    if (entry.memo.isNotBlank()) Text("附言：${entry.memo}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (entry.amount.isBlank()) Text(entry.description, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (log.unparsedRows.isNotEmpty()) item {
+            var expanded by rememberSaveable { mutableStateOf(false) }
+            TextButton(onClick = { expanded = !expanded }) {
+                Text("未识别记录 ${log.unparsedRows.size} 条（保留原样）")
+                Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+            }
+            if (expanded) log.unparsedRows.forEach { row ->
+                Text(row.joinToString(" · "), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (log.links.isNotEmpty()) item { TaskLinks(log.links, actions) }
+    }
+}
+
+@Composable
+private fun RewardScreen(c: AppController, page: PageData, native: NativeSitePage, actions: KfActions, rich: RichContent) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 100.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            Text("奖励与争夺", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("准备信息来自站点页面和已确认的脚本；实际执行必须由你点按确认，且不会自动连续执行。",
+                Modifier.padding(top = 6.dp), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        items(native.rewards, key = { it.id }) { action ->
+            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))) {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(action.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (action.protocol == RewardProtocol.AJAX_POST) "一次只执行一个战斗步骤；不会自动刷或连续攻击。"
+                        else "领取请求可能消耗资格或次数，提交后会重新读取状态确认。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Button(onClick = { c.requestReward(action) }, enabled = !c.rewardBusy && !c.siteBusy,
+                        modifier = Modifier.fillMaxWidth()) { Text(if (c.rewardBusy) "正在处理…" else "确认并执行") }
+                }
+            }
+        }
+        item { TaskPageExtras(c, native.copy(rewards = emptyList()), actions, rich) }
     }
 }
 
@@ -146,10 +322,23 @@ private fun ProfileScreen(c: AppController, native: NativeSitePage, actions: KfA
 
 @Composable
 private fun ProfileSettingsScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent) {
-    val form = native.forms.single()
+    val form = native.forms.firstOrNull { it.actionUrl.contains("profile.php") } ?: native.forms.first()
     val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
     LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("头像上传暂未支持", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item {
+            Text("头像", Modifier.padding(top = 4.dp), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
+            Text("使用 Android 照片选择器；图片会在本机裁剪为站点要求的尺寸，再走单独的 ajaxface 上传协议。",
+                Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("上传成功后仍以资料页显示为准；若站点要求继续保存资料，请再点击下方“保存更改”。",
+                Modifier.padding(top = 2.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = c::requestAvatarPicker, enabled = !c.avatarBusy && !c.siteBusy,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Icon(Icons.Default.AccountCircle, null)
+                Text(if (c.avatarBusy) " 正在上传…" else " 选择并预览新头像")
+            }
+            if (c.pendingAvatar != null) Text("已选择：${c.pendingAvatar?.name}，确认后才会发送。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+        }
         val groups = form.fields.groupBy(::profileFieldSection)
         listOf("基本资料", "显示", "论坛偏好", "安全", "更多").forEach { group ->
             val fields = groups[group].orEmpty()
@@ -187,6 +376,12 @@ private fun BankScreen(c: AppController, native: NativeSitePage, actions: KfActi
                     Text(info.value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 } }
             }
+        }
+        bank.links.firstOrNull { it.url.contains("action=log") }?.let { log ->
+            item { ListItem(headlineContent = { Text("查看银行日志（只读）") },
+                supportingContent = { Text("余额和日志是两个独立来源；不会根据余额变化推断交易成功。") },
+                leadingContent = { Icon(Icons.AutoMirrored.Filled.ReceiptLong, null) },
+                modifier = Modifier.clickable { actions.open(log.url) }) }
         }
         items(native.forms, key = { it.id }) { form ->
             ListItem(headlineContent = { Text(form.title) }, leadingContent = { Icon(Icons.Default.AccountBalanceWallet, null) },

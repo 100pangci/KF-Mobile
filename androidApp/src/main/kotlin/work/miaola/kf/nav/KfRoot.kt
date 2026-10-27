@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package work.miaola.kf.nav
 
@@ -19,6 +19,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
@@ -94,6 +96,37 @@ private fun KfRootForServer(
             }
         }
 
+        var startupRestoreDone by remember { mutableStateOf(false) }
+        LaunchedEffect(c.home, c.page) {
+            if (startupRestoreDone || c.home == null) return@LaunchedEffect
+            startupRestoreDone = true
+            val saved = c.recoveredDestination() ?: return@LaunchedEffect
+            if (location.kind != KfDestinationKind.FEED || saved.kind == KfDestinationKind.FEED.name ||
+                saved.kind in setOf(KfDestinationKind.SETTINGS.name, KfDestinationKind.LOGIN.name)) return@LaunchedEffect
+            when (saved.kind) {
+                KfDestinationKind.BOARDS.name -> goRoot(KfRoutes.BOARDS)
+                KfDestinationKind.ACCOUNT.name -> goRoot(KfRoutes.ACCOUNT)
+                KfDestinationKind.MESSAGES.name -> goRoot(KfRoutes.messages(saved.url.ifBlank { "message.php" }), restore = false)
+                KfDestinationKind.LISTING.name -> if (saved.url.isNotBlank()) go(KfRoutes.listing(saved.url))
+                KfDestinationKind.READER.name -> if (saved.url.isNotBlank()) go(KfRoutes.reader(saved.url))
+                KfDestinationKind.MESSAGE.name -> if (saved.url.isNotBlank()) go(KfRoutes.message(saved.url))
+                KfDestinationKind.PROFILE.name -> if (saved.url.isNotBlank()) go(KfRoutes.profile(saved.url))
+                KfDestinationKind.NATIVE.name -> if (saved.url.isNotBlank()) go(KfRoutes.native(saved.url))
+                KfDestinationKind.EDITOR.name -> if (saved.url.isNotBlank()) go(KfRoutes.editor(saved.url))
+                KfDestinationKind.SEARCH.name -> go(
+                    if (saved.url.isNotBlank()) KfRoutes.searchResult(saved.url)
+                    else KfRoutes.search(saved.query, saved.author)
+                )
+                KfDestinationKind.GUGU.name -> go(KfRoutes.GUGU)
+            }
+        }
+        LaunchedEffect(startupRestoreDone, location.kind, location.url, location.query, location.author) {
+            if (!startupRestoreDone) return@LaunchedEffect
+            if (location.kind !in setOf(KfDestinationKind.SETTINGS, KfDestinationKind.LOGIN)) {
+                c.rememberDestination(location.kind.name, location.url, location.query, location.author)
+            }
+        }
+
         fun open(url: String) {
             if (url.isBlank() || c.siteBusy || c.purchaseBusy || c.editor != null && c.busy) return
             val target = c.resolve(url)
@@ -141,6 +174,7 @@ private fun KfRootForServer(
                 KfDestinationKind.PROFILE -> go(KfRoutes.profile(url))
                 KfDestinationKind.LOGIN -> go(KfRoutes.LOGIN)
                 KfDestinationKind.SETTINGS -> go(KfRoutes.SETTINGS)
+                KfDestinationKind.GUGU -> go(KfRoutes.GUGU)
                 KfDestinationKind.NATIVE -> go(KfRoutes.native(url))
             }
         }
@@ -198,6 +232,7 @@ private fun KfRootForServer(
             KfDestinationKind.SEARCH -> page?.title ?: "搜索"
             KfDestinationKind.MESSAGE, KfDestinationKind.PROFILE, KfDestinationKind.NATIVE ->
                 page?.nativePage?.title ?: page?.title ?: "更多功能"
+            KfDestinationKind.GUGU -> "咕咕镇"
             KfDestinationKind.LISTING -> if (page?.nativePage?.favorites != null) "收藏" else page?.title ?: "话题"
             KfDestinationKind.READER -> page?.title ?: "阅读"
         }
@@ -349,6 +384,9 @@ private fun KfRootForServer(
                             DisposableEffect(Unit) { onDispose { c.showSettings = false } }
                             SettingsScreen(c)
                         }
+                        composable(KfRoutes.GUGU) {
+                            GuguScreen(c, actions)
+                        }
                         composable(KfRoutes.LOGIN) {
                             var authenticatedOnEntry by remember { mutableStateOf(c.authenticated) }
                             DisposableEffect(Unit) { onDispose { c.dismissLogin() } }
@@ -422,6 +460,9 @@ private fun KfRootForServer(
                         ) { entry ->
                             val sourceUrl = entry.arguments?.getString("url").orEmpty()
                             var seenEditor by remember { mutableStateOf(c.editor != null) }
+                            val focusManager = LocalFocusManager.current
+                            val keyboard = LocalSoftwareKeyboardController.current
+                            val imeVisible = WindowInsets.isImeVisible
                             LaunchedEffect(sourceUrl, c.authenticated) {
                                 if (c.editor?.sourceUrl != sourceUrl) c.openEditor(sourceUrl)
                             }
@@ -429,7 +470,9 @@ private fun KfRootForServer(
                                 if (c.editor != null) seenEditor = true
                                 else if (seenEditor) nav.popBackStack()
                             }
-                            BackHandler(enabled = c.editorDirty || c.loadingEditor || c.busy) { back() }
+                            BackHandler(enabled = c.editorDirty || c.loadingEditor || c.busy) {
+                                if (imeVisible) { focusManager.clearFocus(); keyboard?.hide() } else back()
+                            }
                             if (c.editor?.sourceUrl == sourceUrl) EditorScreen(c, forumImage)
                             else KfLoading(c, message = "正在准备编辑器…", onRetry = { c.openEditor(sourceUrl) })
                         }

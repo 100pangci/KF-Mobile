@@ -89,8 +89,9 @@ class InteractionPolicyTest {
             listOf(SiteField("entry", "delid[]", "示例收藏", SiteFieldKind.CHECKBOX, emptyList(), listOf(FormOption("1", "示例收藏")))),
             listOf(SiteSubmit("删除", null, "")))
         c.requestSiteSubmit(form, mapOf("entry" to listOf("1")), form.submits.single()); runCurrent()
-        assertNotNull(c.pendingSiteSubmission)
-        c.confirmSiteAction(); runCurrent()
+        assertNotNull(c.pendingBatch)
+        c.confirmBatch(); runCurrent()
+        assertNull(c.pendingBatch)
         assertEquals(url, c.page?.url); assertNull(c.pendingNativePage); assertFalse(c.showSiteTools)
         assertEquals(1, factory.services.getValue(c.origin).siteSubmissions)
         c.close()

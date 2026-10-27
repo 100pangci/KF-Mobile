@@ -56,18 +56,23 @@ internal class AuditReadPolicy(private val origin: String) {
             "/profile.php" -> setOf("action", "uid", "type", "page", "sf")
             "/message.php" -> setOf("action", "mid", "page", "touid", "remid", "towhere")
             "/post.php" -> setOf("action", "fid", "tid", "pid", "article")
-            "/hack.php" -> setOf("H_name")
+            "/hack.php" -> setOf("H_name", "action", "to", "page")
             "/kf_no1.php" -> setOf("no1", "page")
             "/faq.php" -> setOf("id", "hid", "action")
             "/guanjianci.php" -> setOf("gjc", "page", "uid")
             "/kf_share.php", "/show.php" -> setOf("uid", "page", "fid", "tid", "action")
-            "/kf_growup.php", "/kf_lv200.php", "/kf_fw_1wkfb.php", "/kf_fw_ig_index.php" -> setOf("ping", "page", "uid")
-            "/fyg_sjcdwj.php" -> emptySet()
+            "/kf_growup.php", "/kf_lv200.php", "/kf_fw_1wkfb.php", "/kf_fw_ig_index.php" -> setOf("ping", "page", "uid", "do", "safeid", "id")
+            "/fyg_sjcdwj.php" -> setOf("go", "xl")
             else -> return false
         }
         if (!u.queryParameterNames.all { it in allowed }) return false
         val action = u.queryParameter("action")
         if (u.encodedPath == "/faq.php" && action !in listOf(null, "", "faq")) return false
+        if (u.encodedPath == "/hack.php" && !(u.queryParameter("H_name") == "bank" &&
+                (action == null || action == "log") && u.queryParameter("to") in listOf(null, "", "0", "1"))) return false
+        if (u.encodedPath == "/fyg_sjcdwj.php" && u.queryParameterNames.isNotEmpty() &&
+            !(u.queryParameter("go") == "play" && u.queryParameter("xl") in listOf("1", "2"))) return false
+        if (u.encodedPath == "/kf_fw_1wkfb.php" && u.queryParameter("do") != null && u.queryParameter("do") != "2") return false
         if (u.encodedPath in listOf("/show.php", "/kf_share.php") && action != null) return false
         return true
     }
