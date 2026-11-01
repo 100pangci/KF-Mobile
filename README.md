@@ -4,7 +4,7 @@
 
 ## 安装
 
-本地构建后在 `artifacts/KF-Mobile-<版本>-debug.apk` 生成安装包；发布包请从 GitHub Releases 下载。支持直接覆盖旧版。
+本地构建后在 `artifacts/KF-Mobile-<版本>-debug.apk` 生成安装包；发布包请从 GitHub Releases 下载。Debug 包名为 `work.miaola.kf.mobile.debug`，Release 包名为 `work.miaola.kf.mobile`，两者签名不同但可同时安装，应用数据互不共享。
 
 ## 使用
 
@@ -60,6 +60,48 @@ Remove-Item Env:KF_TEST_ACCOUNT
 `local.properties` 保存本机 SDK 路径，不进入源码包。`.secrets/` 是开发登录调试目录，已忽略。
 
 本地只读站点巡检、真实数据离线渲染、覆盖矩阵与验证范围见 [docs/native-coverage.md](docs/native-coverage.md)。巡检优先使用已有 `cookie.txt`，其次 `.secrets/<host>.cookies.txt`，不要求账号密码；真实 HTML 和截图只留在 `.secrets/site-audit/`。
+
+## 发布与签名
+
+Release APK 使用独立密钥签名，不复用 debug 签名。Release 构建启用 R8 全模式代码收缩、优化、混淆与资源收缩，并保留 `androidApp/proguard-rules.pro` 中的 kotlinx.serialization 序列化器规则。密钥、密码和 `keystore.properties` 均被 `.gitignore` 排除，不要提交。首次生成密钥并配置本地签名：
+
+```powershell
+keytool -genkeypair -keystore .secrets/kf-release.jks -storetype PKCS12 `
+  -alias kf-release -keyalg RSA -keysize 4096 -sigalg SHA256withRSA `
+  -validity 10000 -dname "CN=KF Mobile Release, OU=Android, O=miaola, C=CN"
+Copy-Item keystore.properties.example keystore.properties
+# 编辑 keystore.properties，填入与密钥一致的两次密码
+.\gradlew.bat :androidApp:assembleRelease
+```
+
+产物位于 `androidApp/build/outputs/apk/release/androidApp-release.apk`，混淆映射位于同目录旁的 `androidApp/build/outputs/mapping/release/`。
+
+`androidApp/build.gradle.kts` 优先读取 `ANDROID_KEYSTORE_PATH`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 环境变量，未设置时回退到根目录的 `keystore.properties`；两者都没有时 release 构建不配置签名。可用 `apksigner verify --print-certs <apk>` 核对签名证书；工作流同时固定校验发布证书的 SHA-256 指纹，更换密钥时需同步更新 `.github/workflows/release.yml` 中的期望值。
+
+`.github/workflows/release.yml` 在推送 `v*` 标签（或手动触发）时运行测试、签名 release 构建与 lint，校验 APK 签名证书，上传 `KF-Mobile-<版本>-release.apk`、`SHA256SUMS.txt` 和 R8 混淆映射文件（映射文件只作为 CI artifact 保留，不放入公开 Release），并在标签构建时创建或更新对应 GitHub Release。发布前需在仓库 Actions Secrets 中配置：
+
+- `RELEASE_KEYSTORE_BASE64`：密钥文件的 Base64 单行文本
+- `RELEASE_KEYSTORE_PASSWORD`
+- `RELEASE_KEY_ALIAS`（当前为 `kf-release`）
+- `RELEASE_KEY_PASSWORD`
+
+可用 `gh` 设置；密码与 Base64 值不要出现在命令历史或日志中：
+
+```powershell
+gh secret set RELEASE_KEYSTORE_BASE64 < .secrets/kf-release.jks.b64
+gh secret set RELEASE_KEYSTORE_PASSWORD   # 交互输入
+gh secret set RELEASE_KEY_ALIAS           # 当前为 kf-release
+gh secret set RELEASE_KEY_PASSWORD        # 交互输入
+```
+
+标签名必须与 `androidApp/build.gradle.kts` 中的 `versionName` 一致（当前为 `v0.3.1`），否则工作流失败。发布流程：
+
+```powershell
+git tag -a v0.3.1 -m "KF Mobile 0.3.1"
+git push origin v0.3.1
+```
+
+请备份 `.secrets/kf-release.jks` 和密码；密钥丢失后无法以同一应用身份为已安装版本提供更新。
 
 ## 隐私
 
