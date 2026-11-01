@@ -61,7 +61,7 @@ fun SearchScreen(c: AppController, actions: KfActions, initialKeyword: String = 
         Row(Modifier.fillMaxWidth().padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = actions.back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
             OutlinedTextField(keyword, { keyword = it }, Modifier.weight(1f).focusRequester(focus),
-                placeholder = { Text("搜索绯月") }, singleLine = true,
+                placeholder = { Text("搜索绯月") }, singleLine = true, shape = KfFieldShape,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { search() }),
                 trailingIcon = { IconButton(onClick = ::search, enabled = !c.busy) { Icon(Icons.Default.Search, "搜索") } })
@@ -70,20 +70,29 @@ fun SearchScreen(c: AppController, actions: KfActions, initialKeyword: String = 
         if (submittedAuthor.isNotBlank()) Text("作者：$submittedAuthor", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelMedium)
         when {
             result != null -> key(key) { ListingScreen(c, actions, result, false, if (receipt.isBlank()) submittedKeyword to submittedAuthor else null) }
-            submitted -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                if (c.busy) CircularProgressIndicator() else Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(c.error ?: "未能获取搜索结果")
-                    TextButton(onClick = { if (receipt.isNotBlank()) c.ensureSearchResult(receipt) else c.ensureSearch(key, submittedKeyword, submittedAuthor) }) { Text("重试") }
-                }
+            submitted -> Box(Modifier.fillMaxSize()) {
+                if (c.busy || attemptedKey != key) KfSkeletonScreen(rows = 4)
+                else KfEmptyState(
+                    icon = Icons.Default.CloudOff,
+                    title = c.error ?: "未能获取搜索结果",
+                    actionLabel = "重试",
+                    onAction = { if (receipt.isNotBlank()) c.ensureSearchResult(receipt) else c.ensureSearch(key, submittedKeyword, submittedAuthor) },
+                    modifier = Modifier.align(Alignment.Center).padding(top = 24.dp),
+                )
             }
-            else -> Text("搜索帖子，也可以按作者筛选", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> KfEmptyState(
+                icon = Icons.Default.Search,
+                title = "搜索帖子",
+                message = "输入关键词，也可以按作者筛选。",
+                modifier = Modifier.padding(top = 24.dp),
+            )
         }
     }
     if (filters) ModalBottomSheet(onDismissRequest = { filters = false }) {
         Column(Modifier.fillMaxWidth().padding(24.dp).imePadding(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text("搜索筛选", style = MaterialTheme.typography.titleLarge)
-            OutlinedTextField(author, { author = it }, Modifier.fillMaxWidth(), label = { Text("作者（可选）") }, singleLine = true)
-            Button(onClick = { filters = false; search() }, Modifier.fillMaxWidth()) { Text("应用并搜索") }
+            OutlinedTextField(author, { author = it }, Modifier.fillMaxWidth(), label = { Text("作者（可选）") }, singleLine = true, shape = KfFieldShape)
+            Button(onClick = { filters = false; search() }, Modifier.fillMaxWidth(), shape = KfFieldShape) { Text("应用并搜索") }
         }
     }
 }

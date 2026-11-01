@@ -108,6 +108,16 @@ data class NativeSitePage(
     val statusTimeline: NativeStatusTimeline? = null,
     val bankLog: NativeBankLog? = null,
     val rewards: List<RewardAction> = emptyList(),
+    val messageClear: SiteDestination? = null,
+    val messageExport: NativeMessageExport? = null,
+)
+
+/** The mailbox POST form offers action=down beside action=del. */
+data class NativeMessageExport(
+    val formId: String,
+    val box: String,
+    val label: String,
+    val requiresSelection: Boolean,
 )
 
 data class NativeMessageSummary(val url: String, val title: String, val sender: String, val recipient: String,
@@ -118,7 +128,20 @@ data class NativeFavoriteEntry(val topic: SiteLink, val selectionFieldId: String
 data class NativeFavorites(val entries: List<NativeFavoriteEntry>, val categories: List<SiteDestination>)
 data class NativeBank(val balances: List<NativeInfo>, val rules: List<String>, val links: List<SiteDestination>)
 data class NativeBlocklist(val formId: String, val fieldId: String)
-data class NativeProgress(val stats: List<NativeInfo>, val status: List<String> = emptyList())
+data class NativeProgressPenalty(
+    val time: String = "",
+    val points: String = "",
+    val action: String = "",
+    val title: String = "",
+    val reason: String = "",
+    val url: String = "",
+)
+
+data class NativeProgress(
+    val stats: List<NativeInfo>,
+    val status: List<String> = emptyList(),
+    val penalties: List<NativeProgressPenalty> = emptyList(),
+)
 
 data class LocalUpload(val id: String, val name: String, val mimeType: String, val bytes: ByteArray, val slot: Int = 0) {
     override fun toString() = "LocalUpload(id=$id, bytes=${bytes.size})"
@@ -128,6 +151,19 @@ data class FilePickerRequest(val target: String, val fieldId: String, val multip
 data class FilePart(val name: String, val file: LocalUpload)
 data class ImageGallery(val urls: List<String>, val initialIndex: Int)
 data class NativeDownloadRequest(val url: String, val suggestedName: String, val isImage: Boolean = false)
+data class NativeFileSave(val suggestedName: String, val bytes: ByteArray, val mimeType: String = "application/octet-stream") {
+    override fun toString() = "NativeFileSave(name=$suggestedName, bytes=${bytes.size})"
+}
+data class MessageExportRequest(val sourceUrl: String, val form: SiteForm, val values: List<FormValue>) {
+    override fun toString() = "MessageExportRequest(form=${form.id}, values=${values.size})"
+}
+sealed class MessageExportResult {
+    class Success(val fileName: String, val bytes: ByteArray, val mimeType: String) : MessageExportResult() {
+        override fun toString() = "MessageExportResult.Success(name=$fileName, bytes=${bytes.size})"
+    }
+    data class Rejected(val message: String) : MessageExportResult()
+    data class Uncertain(val message: String) : MessageExportResult()
+}
 data class SiteSubmission(val form: SiteForm, val values: List<FormValue>, val files: List<FilePart>, val submit: SiteSubmit) {
     override fun toString() = "SiteSubmission(form=${form.id}, files=${files.size})"
 }
@@ -161,6 +197,12 @@ fun buildSiteFormValues(form: SiteForm, state: Map<String, List<String>>, submit
     if (value("propwd").isNotEmpty()) {
         require(value("propwd") == value("check_pwd")) { "两次新密码不一致" }
         require(value("oldpwd").isNotEmpty()) { "修改密码需要原密码" }
+    }
+    if (form.fields.any { it.name == "psize" } && form.hidden.any { it.name == "ptid" }) {
+        val size = value("psize")
+        require(size.matches(Regex("[0-9]{1,7}(?:\\.[0-9]{1,3})?")) && (size.toDoubleOrNull() ?: 0.0) > 0.0) {
+            "请填写大于零的资源体积（数字，最多三位小数）"
+        }
     }
     return values
 }

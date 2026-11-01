@@ -1,11 +1,16 @@
 package work.miaola.kf.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import work.miaola.kf.ThemeMode
 
 private val Light = lightColorScheme(
@@ -31,10 +36,32 @@ private val Dark = darkColorScheme(
     outline = Color(0xFFA18A91), outlineVariant = Color(0xFF524348),
 )
 
+private val KfShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
+
+private val KfTypography = Typography().let { base ->
+    base.copy(
+        headlineSmall = base.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+        titleLarge = base.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+        titleMedium = base.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+        titleSmall = base.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+    )
+}
+
 @Composable
 fun KfTheme(mode: ThemeMode, content: @Composable () -> Unit) {
     val dark = when (mode) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
-    MaterialTheme(colorScheme = if (dark) Dark else Light, content = content)
+    MaterialTheme(
+        colorScheme = if (dark) Dark else Light,
+        shapes = KfShapes,
+        typography = KfTypography,
+        content = content,
+    )
 }
 
 fun kfBackground(dark: Boolean): Color = if (dark) Color(0xFF191114) else Color(0xFFFFF8F7)

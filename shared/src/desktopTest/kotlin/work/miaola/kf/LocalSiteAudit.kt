@@ -60,8 +60,10 @@ internal class AuditReadPolicy(private val origin: String) {
             "/kf_no1.php" -> setOf("no1", "page")
             "/faq.php" -> setOf("id", "hid", "action")
             "/guanjianci.php" -> setOf("gjc", "page", "uid")
-            "/kf_share.php", "/show.php" -> setOf("uid", "page", "fid", "tid", "action")
+            "/kf_share.php", "/show.php" -> setOf("uid", "page", "fid", "tid", "action", "new", "ti")
             "/kf_growup.php", "/kf_lv200.php", "/kf_fw_1wkfb.php", "/kf_fw_ig_index.php" -> setOf("ping", "page", "uid", "do", "safeid", "id")
+            "/kf_fw_ig_mybp.php", "/kf_fw_ig_halo.php", "/kf_fw_ig_pklist.php", "/kf_fw_ig_shop.php" -> emptySet()
+            "/kf_fw_ig_readme.php" -> setOf("safeid")
             "/fyg_sjcdwj.php" -> setOf("go", "xl")
             else -> return false
         }

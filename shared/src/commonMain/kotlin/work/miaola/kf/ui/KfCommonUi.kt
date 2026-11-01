@@ -2,6 +2,13 @@
 
 package work.miaola.kf.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -20,11 +27,20 @@ import work.miaola.kf.*
 /** Shared status strip shown above every destination. */
 @Composable
 fun KfStatusBanners(c: AppController) {
-    c.sessionNotice?.let { message ->
-        Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
-            Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(message, Modifier.weight(1f).padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
-                IconButton(onClick = c::dismissSessionNotice) { Icon(Icons.Default.Close, "关闭状态提示") }
+    AnimatedContent(
+        targetState = c.sessionNotice,
+        transitionSpec = {
+            (expandVertically(tween(KfMotionSpec.Standard)) + fadeIn(tween(KfMotionSpec.Quick))) togetherWith
+                (shrinkVertically(tween(KfMotionSpec.Quick)) + fadeOut(tween(KfMotionSpec.Quick)))
+        },
+        label = "sessionNotice",
+    ) { message ->
+        if (message != null) {
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer) {
+                Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(message, Modifier.weight(1f).padding(vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
+                    IconButton(onClick = c::dismissSessionNotice) { Icon(Icons.Default.Close, "关闭状态提示") }
+                }
             }
         }
     }
@@ -44,12 +60,17 @@ fun KfOperationFeedback(c: AppController, snackbar: SnackbarHostState, hasConten
 }
 
 @Composable
-fun KfPageLoadState(loading: Boolean, error: String?, onRetry: () -> Unit, message: String = "正在加载…") {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            if (loading) CircularProgressIndicator() else Icon(Icons.Default.CloudOff, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(if (loading) message else error ?: "这里还没有内容", style = MaterialTheme.typography.bodyMedium)
-            if (!loading) TextButton(onClick = onRetry) { Text("重试") }
+fun KfPageLoadState(loading: Boolean, error: String?, onRetry: () -> Unit, message: String = "正在连接绯月…") {
+    if (loading) {
+        KfSkeletonScreen(message = message, rows = 4, modifier = Modifier.fillMaxSize())
+    } else {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            KfEmptyState(
+                icon = if (error != null) Icons.Default.CloudOff else Icons.Default.Forum,
+                title = error ?: "这里还没有内容",
+                actionLabel = "重试",
+                onAction = onRetry,
+            )
         }
     }
 }
@@ -97,14 +118,16 @@ fun KfGlobalDialogs(c: AppController, logout: Boolean = false, onLogoutChange: (
     }
 
     c.pendingReward?.let { action ->
-        AlertDialog(onDismissRequest = c::dismissReward, title = { Text("确认执行奖励操作？") },
+        AlertDialog(onDismissRequest = c::dismissReward, title = { Text("确认执行该操作？") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(action.title)
-                    Text(if (action.protocol == RewardProtocol.AJAX_POST)
-                        "只执行一个战斗步骤，不会自动连续攻击；结果不明确时不会重试。"
-                    else "领取可能消耗资格或次数；提交后会重新读取奖励状态确认。",
-                        style = MaterialTheme.typography.bodyMedium)
+                    Text(action.confirmation.ifBlank {
+                        when (action.kind) {
+                            "battle-step" -> "只执行一个战斗步骤，不会自动连续攻击；结果不明确时不会重试。"
+                            else -> "该操作会改变奖励或道具状态；提交后刷新页面核对，不会自动重试。"
+                        }
+                    }, style = MaterialTheme.typography.bodyMedium)
                     Text("服务器：${c.origin}", style = MaterialTheme.typography.bodySmall)
                 }
             },
@@ -186,6 +209,21 @@ fun KfGlobalDialogs(c: AppController, logout: Boolean = false, onLogoutChange: (
 
 }
 
+/**
+ * Screens that already own pull-to-refresh should not also offer a top-bar
+ * refresh. Favorites management is intentionally excluded: its pull-to-refresh
+ * is disabled while selecting, so the menu remains the safe explicit entry.
+ */
+internal fun pageHasPullToRefresh(kind: KfDestinationKind, page: PageData?): Boolean {
+    val current = page ?: return false
+    val native = current.nativePage ?: return false
+    if (kind in setOf(KfDestinationKind.LISTING, KfDestinationKind.MESSAGES) && native.favorites == null) return true
+    if (kind in setOf(KfDestinationKind.NATIVE, KfDestinationKind.MESSAGE, KfDestinationKind.PROFILE)) {
+        return nativeTaskUsesPullToRefresh(current)
+    }
+    return false
+}
+
 /** Context belongs to the destination, not to whichever cached page loaded last. */
 @Composable
 fun KfPageActions(c: AppController, kind: KfDestinationKind, page: PageData?, actions: KfActions, onRefresh: () -> Unit) {
@@ -216,15 +254,45 @@ fun KfPageActions(c: AppController, kind: KfDestinationKind, page: PageData?, ac
         if (message != null) IconButton(onClick = { actions.open(message.url) }) { Icon(Icons.Default.MailOutline, "私信") }
     }
     if (kind !in setOf(KfDestinationKind.READER, KfDestinationKind.LISTING, KfDestinationKind.PROFILE,
-            KfDestinationKind.NATIVE, KfDestinationKind.MESSAGE, KfDestinationKind.MESSAGES)) return
+            KfDestinationKind.NATIVE, KfDestinationKind.MESSAGE)) return
     val recommend = page?.nativePage?.forms?.firstOrNull { it.id == "rpc:recommend" }
+    val detailActionUrls = page?.nativePage?.message?.let { detail ->
+        detail.actions.map { it.url }.toSet() + listOfNotNull(detail.reply?.url)
+    } ?: emptySet()
+    val nativeLinks = page?.nativePage?.links.orEmpty()
+        .filterNot { kind == KfDestinationKind.MESSAGE && it.url in detailActionUrls }
+        .filterNot { kind == KfDestinationKind.PROFILE && it.url.contains("message.php?action=write") }
+        .distinctBy { it.url }
     val tools = !favoriteListing && kind in setOf(KfDestinationKind.READER, KfDestinationKind.LISTING) &&
         (page?.nativePage?.forms?.any { it.id != "rpc:recommend" } == true || page?.nativePage?.links?.isNotEmpty() == true)
+    val showRefresh = !pageHasPullToRefresh(kind, page)
+    val showRecommend = kind == KfDestinationKind.READER && recommend != null
+    if (nativeLinks.isEmpty() && !showRefresh && !showRecommend && !tools) return
     Box {
         IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "更多") }
         DropdownMenu(menu, { menu = false }) {
-            DropdownMenuItem(text = { Text("刷新") }, leadingIcon = { Icon(Icons.Default.Refresh, null) }, onClick = { menu = false; onRefresh() })
-            if (kind == KfDestinationKind.READER && recommend != null) DropdownMenuItem(
+            nativeLinks.forEach { link ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(link.title.ifBlank { "更多功能" }, style = MaterialTheme.typography.bodyMedium)
+                            if (link.effect != SiteEffect.READ) Text(
+                                effectHint(link),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    leadingIcon = { Icon(effectIcon(link.effect), null, Modifier.size(20.dp)) },
+                    onClick = {
+                        menu = false
+                        if (link.effect == SiteEffect.READ) actions.open(link.url) else c.openSiteDestination(link)
+                    },
+                )
+            }
+            if (nativeLinks.isNotEmpty() && showRefresh) HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            if (showRefresh) DropdownMenuItem(text = { Text("刷新") }, leadingIcon = { Icon(Icons.Default.Refresh, null) }, onClick = { menu = false; onRefresh() })
+            if (showRecommend) DropdownMenuItem(
                 text = { Text("推荐帖子") }, leadingIcon = { Icon(Icons.Default.ThumbUp, null) },
                 enabled = !c.siteBusy,
                 onClick = { menu = false; c.requestSiteSubmit(recommend, emptyMap(), recommend.submits.first()) })

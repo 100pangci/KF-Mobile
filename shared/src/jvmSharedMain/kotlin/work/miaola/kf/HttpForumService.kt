@@ -7,6 +7,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -115,6 +116,8 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     private val purchaseMutex = Mutex()
     private val siteMutex = Mutex()
     private val editorSubmitMutex = Mutex()
+    private val guguMutex = Mutex()
+    private var guguProtocol: GuguProtocol? = null
     private val client = OkHttpClient.Builder().cookieJar(cookieJar).followRedirects(false).followSslRedirects(false)
         .retryOnConnectionFailure(false).connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).apply { if (transport != null) addInterceptor(transport) }.build()
@@ -337,15 +340,23 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     override suspend fun submitSite(submission: SiteSubmission): SiteActionResult = siteMutex.withLock {
         require(sameOrigin(submission.form.sourceUrl) && sameOrigin(submission.form.actionUrl)) { "已阻止跨域表单" }
         val sourceEffect = destination(submission.form.sourceUrl).effect
-        if (sourceEffect !in listOf(SiteEffect.READ, SiteEffect.DOWNLOAD)) return@withLock SiteActionResult.Rejected("此表单来源包含操作参数，不能自动重读；请从功能首页重新进入")
+        // The rating entry (`do=1&safeid&ptid`) is the one CHANGE page whose
+        // form posts back to the entry itself. Re-reading it resumes the same
+        // rating session; every other CHANGE source remains non-reloadable.
+        val ratingEntry = isRatingEntryForm(submission.form)
+        if (sourceEffect !in listOf(SiteEffect.READ, SiteEffect.DOWNLOAD) && !ratingEntry)
+            return@withLock SiteActionResult.Rejected("此表单来源包含操作参数，不能自动重读；请从功能首页重新进入")
         val fresh = if (sourceEffect == SiteEffect.DOWNLOAD) submission.form else {
             val refreshed = fetch(submission.form.sourceUrl)
             if (refreshed.authStatus == AuthStatus.LOGIN_REQUIRED) return@withLock SiteActionResult.Response(refreshed)
             if (!isSamePageList(submission.form.sourceUrl, refreshed.url) ||
                 (submission.form.sourceUrl.toHttpUrl().queryParameter("page") ?: "1") != (refreshed.url.toHttpUrl().queryParameter("page") ?: "1"))
                 return@withLock SiteActionResult.Rejected("表单来源页已变化，未提交，请重新打开")
-            refreshed.nativePage?.forms?.firstOrNull { it.id == submission.form.id }
+            val candidate = refreshed.nativePage?.forms?.firstOrNull { it.id == submission.form.id }
                 ?: return@withLock SiteActionResult.Rejected("表单已变化，请刷新后重试")
+            if (ratingEntry && (!isRatingEntryForm(candidate) || ratingSessionOf(candidate) != ratingSessionOf(submission.form)))
+                return@withLock SiteActionResult.Rejected("评分会话已变化或已失效，未提交；请回到评分记录重新进入")
+            candidate
         }
         val clicked = fresh.submits.firstOrNull { it.name == submission.submit.name && it.value == submission.submit.value }
             ?: return@withLock SiteActionResult.Rejected("提交选项已变化，请刷新")
@@ -392,6 +403,44 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         catch (_: Exception) { SiteActionResult.Uncertain("请求结果无法确认，不会自动重复提交；请刷新后核对。") }
     }
 
+    /**
+     * The rating flow is the only form reached from a CHANGE link: entering
+     * `do=1&safeid&ptid` starts (or resumes) a 15-minute rating session, and
+     * the form posts the four rating controls back to that same entry. Accept
+     * a fresh re-read only for this exact shape and session identity; anything
+     * else keeps the conservative "cannot re-read" refusal.
+     */
+    private fun isRatingEntryForm(form: SiteForm): Boolean {
+        if (form.method != "GET" || form.multipart) return false
+        val source = form.sourceUrl.toHttpUrlOrNull() ?: return false
+        if (source.encodedPath != "/kf_fw_1wkfb.php") return false
+        if (source.queryParameterNames.any { it !in setOf("do", "safeid", "ptid", "sf") }) return false
+        if (source.queryParameterValues("do") != listOf("1")) return false
+        val safeid = source.queryParameter("safeid").orEmpty()
+        val ptid = source.queryParameter("ptid").orEmpty()
+        if (!safeid.matches(Regex("[0-9a-zA-Z]{4,64}"))) return false
+        if (!ptid.matches(Regex("[0-9]{1,12}"))) return false
+        val action = form.actionUrl.toHttpUrlOrNull() ?: return false
+        if (action.encodedPath != "/kf_fw_1wkfb.php" || action.queryParameterNames.isNotEmpty()) return false
+        val hidden = form.hidden.associate { it.name to it.value }
+        if (form.hidden.size != 4 || hidden.keys != setOf("safeid", "do", "ptid", "pbad")) return false
+        if (hidden["safeid"] != safeid || hidden["do"] != "1" || hidden["ptid"] != ptid || hidden["pbad"] != "1") return false
+        val fields = form.fields.associateBy { it.name }
+        if (form.fields.size != 5 || fields.keys != setOf("psize", "psizegb", "pnew", "pgod", "ptext")) return false
+        if (fields.getValue("psize").kind != SiteFieldKind.TEXT) return false
+        if (fields.getValue("ptext").kind != SiteFieldKind.MULTILINE) return false
+        if (listOf("psizegb", "pnew", "pgod").any { name ->
+                val field = fields.getValue(name)
+                field.kind != SiteFieldKind.SELECT || field.options.map { it.value } != listOf("1", "2")
+            }) return false
+        return form.submits.singleOrNull()?.let { it.name == "submit" && it.value == "确认提交" } == true
+    }
+
+    private fun ratingSessionOf(form: SiteForm): Pair<String, String>? {
+        val source = form.sourceUrl.toHttpUrlOrNull() ?: return null
+        return source.queryParameter("safeid").orEmpty() to source.queryParameter("ptid").orEmpty()
+    }
+
     private fun hasExplicitMutationRejection(message: String): Boolean {
         val value = message.replace(Regex("\\s+"), " ").trim()
         if (value.isBlank()) return false
@@ -402,8 +451,8 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     }
 
     override fun encodedLength(value: String): Int = gbkBytes(value).size
-    override fun clearSession() = cookieJar.clear()
-    override fun close() { client.dispatcher.cancelAll() }
+    override fun clearSession() { cookieJar.clear(); guguProtocol = null }
+    override fun close() { client.dispatcher.cancelAll(); guguProtocol = null }
 
     override suspend fun uploadAvatar(request: AvatarUploadRequest): AvatarUploadResult = withContext(Dispatchers.IO) {
         if (!sameOrigin(request.form.sourceUrl) || !sameOrigin(request.form.actionUrl)) {
@@ -490,21 +539,15 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
             return@withContext RewardExecutionResult.Rejected("奖励来源页面已变化，未执行")
         }
         val originalEndpoint = action.endpoint.toHttpUrl()
-        val originalValid = when (action.protocol) {
-            RewardProtocol.AJAX_POST -> action.id == "battle-step" &&
+        val originalValid = when {
+            action.kind == "battle-step" -> action.protocol == RewardProtocol.AJAX_POST &&
+                action.id == "battle-step" &&
                 action.sourceUrl.toHttpUrl().encodedPath == "/kf_fw_ig_index.php" &&
                 action.readbackUrl == action.sourceUrl && originalEndpoint.encodedPath == "/kf_fw_ig_intel.php" &&
                 originalEndpoint.querySize == 0 && action.method == "POST" &&
                 action.fields.size == 1 && action.fields.map { it.name }.distinct().size == action.fields.size &&
                 action.fields.all { it.name == "safeid" && it.value.matches(Regex("[a-zA-Z0-9]{1,64}")) }
-            RewardProtocol.GET_LINK -> originalEndpoint.encodedPath == "/kf_fw_1wkfb.php" &&
-                action.method == "GET" && action.sourceUrl.toHttpUrl().encodedPath == "/kf_fw_1wkfb.php" &&
-                originalEndpoint.queryParameterNames == setOf("do", "safeid", "ptid") &&
-                originalEndpoint.queryParameterNames.all { originalEndpoint.queryParameterValues(it).size == 1 } &&
-                originalEndpoint.queryParameter("ptid") == action.id.removePrefix("claim:") &&
-                originalEndpoint.queryParameter("do") == "1" &&
-                originalEndpoint.queryParameter("safeid").orEmpty().matches(Regex("[a-zA-Z0-9]{1,64}")) &&
-                originalEndpoint.queryParameter("ptid").orEmpty().matches(Regex("[0-9]{1,20}"))
+            else -> isSubpageRewardShape(action)
         }
         if (!originalValid) return@withContext RewardExecutionResult.Rejected("奖励协议已变化，未执行")
         val preparedPage = try { fetch(action.sourceUrl) } catch (e: CancellationException) { throw e
@@ -513,13 +556,21 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         if (preparedPage.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(action.sourceUrl, preparedPage.url)) {
             return@withContext RewardExecutionResult.Rejected("奖励页面登录/来源无法确认，本次未执行")
         }
-        val prepared = preparedPage.nativePage?.rewards?.firstOrNull { it.id == action.id && it.protocol == action.protocol }
+        val prepared = preparedPage.nativePage?.rewards?.firstOrNull {
+            it.id == action.id && it.protocol == action.protocol && it.kind == action.kind
+        }
             ?: return@withContext RewardExecutionResult.Rejected("奖励入口已变化或已处理，本次未执行")
         if (!sameOrigin(prepared.endpoint) || prepared.sourceUrl != preparedPage.url ||
             prepared.readbackUrl != action.readbackUrl) {
             return@withContext RewardExecutionResult.Rejected("奖励协议已变化，本次未执行")
         }
-        if (action.protocol == RewardProtocol.AJAX_POST) {
+        if (action.kind != "battle-step") {
+            if (!isSubpageRewardShape(prepared)) {
+                return@withContext RewardExecutionResult.Rejected("奖励子页协议已变化，未执行")
+            }
+            return@withContext executeSubpageReward(prepared)
+        }
+        if (action.kind == "battle-step") {
             val endpoint = prepared.endpoint.toHttpUrl()
             if (prepared.id != "battle-step" || prepared.sourceUrl.toHttpUrl().encodedPath != "/kf_fw_ig_index.php" ||
                 prepared.readbackUrl != prepared.sourceUrl || endpoint.encodedPath != "/kf_fw_ig_intel.php" ||
@@ -541,51 +592,175 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
             } catch (e: CancellationException) { throw e
             } catch (_: Exception) { RewardExecutionResult.Uncertain("战斗步骤结果无法确认，请刷新角色状态；不会自动重试") }
         }
-        val endpoint = prepared.endpoint.toHttpUrl()
-        if (endpoint.encodedPath != "/kf_fw_1wkfb.php" || action.method != "GET" ||
-            prepared.sourceUrl.toHttpUrl().encodedPath != "/kf_fw_1wkfb.php" ||
-            prepared.readbackUrl != prepared.sourceUrl ||
-            endpoint.queryParameterNames != setOf("do", "safeid", "ptid") ||
-            endpoint.queryParameterNames.any { endpoint.queryParameterValues(it).size != 1 } ||
-            endpoint.queryParameter("ptid") != action.id.removePrefix("claim:") ||
-            endpoint.queryParameter("do") != "1" ||
-            endpoint.queryParameter("safeid").orEmpty().matches(Regex("[a-zA-Z0-9]{1,64}")).not() ||
-            endpoint.queryParameter("ptid").orEmpty().matches(Regex("[0-9]{1,20}")).not()) {
-            return@withContext RewardExecutionResult.Rejected("奖励领取协议已变化，未执行")
-        }
-        try {
-            raw(prepared.endpoint, followRedirects = false, referer = prepared.sourceUrl)
-            val after = try { fetch(prepared.readbackUrl) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-                ?: return@withContext RewardExecutionResult.Uncertain("服务器已接收请求，但奖励页面未能读回；请刷新核对，不要重复领取")
-            if (after.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(prepared.readbackUrl, after.url)) {
-                return@withContext RewardExecutionResult.Uncertain("服务器已接收请求，但奖励页面登录/来源状态无法确认；请刷新核对，不要重复领取")
-            }
-            val ptid = endpoint.queryParameter("ptid")
-            val status = after.nativePage?.statusTimeline?.entries?.firstOrNull { entry ->
-                Regex("[?&]tid=([0-9]+)").find(entry.relatedUrl)?.groupValues?.get(1) == ptid
-            }?.status
-            return@withContext when (status) {
-                StatusKind.COMPLETED -> RewardExecutionResult.Confirmed("站点已将对应奖励记录标记为完成")
-                StatusKind.FAILED, StatusKind.EXPIRED -> RewardExecutionResult.Uncertain("对应记录显示${if (status == StatusKind.EXPIRED) "已过期" else "失败"}，但无法证明本次请求是否执行；请检查记录后再决定下一步。")
-                StatusKind.AVAILABLE -> RewardExecutionResult.Uncertain("奖励入口仍可领取；服务器是否已处理无法确认，请先核对，不要重复请求")
-                StatusKind.WAITING, StatusKind.UNKNOWN, null -> RewardExecutionResult.Uncertain("奖励页面未提供明确的领取完成状态；请刷新核对，不要重复领取")
-            }
-        } catch (e: CancellationException) { throw e
-        } catch (_: Exception) { RewardExecutionResult.Uncertain("奖励请求结果无法确认；请刷新奖励页面，不会自动重试") }
+        return@withContext RewardExecutionResult.Rejected("奖励协议已变化，未执行")
     }
 
-    override suspend fun gugu(): GuguSnapshot? = withContext(Dispatchers.IO) {
+    /**
+     * Validate the captured reward-subpage wire shapes. Only fields and
+     * endpoints rendered by the site are accepted; the target id stays bound to
+     * the action id, while a fresh safeid may be re-issued on revalidation.
+     */
+    private fun isSubpageRewardShape(action: RewardAction): Boolean {
+        val source = action.sourceUrl.toHttpUrlOrNull() ?: return false
+        val endpoint = action.endpoint.toHttpUrlOrNull() ?: return false
+        if (action.readbackUrl != action.sourceUrl) return false
+        val values = action.fields.associate { it.name to it.value }
+        if (values.size != action.fields.size) return false
+        return when {
+            action.kind.startsWith("mybp:") -> {
+                val doValue = action.kind.removePrefix("mybp:")
+                doValue in setOf("1", "2", "3", "4", "5") &&
+                    source.encodedPath == "/kf_fw_ig_mybp.php" &&
+                    endpoint.encodedPath == "/kf_fw_ig_mybpdt.php" && endpoint.querySize == 0 &&
+                    action.protocol == RewardProtocol.AJAX_POST && action.method == "POST" &&
+                    values.keys == setOf("do", "id", "safeid") &&
+                    values["do"] == doValue &&
+                    values["id"]?.matches(Regex("[0-9]{1,20}")) == true &&
+                    values["safeid"]?.matches(Regex("[a-zA-Z0-9]{1,64}")) == true &&
+                    action.id == "mybp:$doValue:${values["id"]}"
+            }
+            action.kind == "shop:buy" ->
+                source.encodedPath == "/kf_fw_ig_shop.php" &&
+                    endpoint.encodedPath == "/kf_fw_ig_shop.php" && endpoint.querySize == 0 &&
+                    action.protocol == RewardProtocol.AJAX_POST && action.method == "POST" &&
+                    values.keys == setOf("buy", "safeid") &&
+                    values["buy"]?.matches(Regex("[0-9]{1,20}")) == true &&
+                    values["safeid"]?.matches(Regex("[a-zA-Z0-9]{1,64}")) == true &&
+                    action.id == "shop:buy:${values["buy"]}"
+            action.kind == "halo:buy" ->
+                source.encodedPath == "/kf_fw_ig_halo.php" &&
+                    endpoint.encodedPath == "/kf_fw_ig_halo.php" &&
+                    endpoint.queryParameterNames == setOf("do", "id", "safeid") &&
+                    endpoint.queryParameterNames.all { endpoint.queryParameterValues(it).size == 1 } &&
+                    endpoint.queryParameter("do") == "buy" &&
+                    action.protocol == RewardProtocol.GET_LINK && action.method == "GET" &&
+                    action.fields.isEmpty() &&
+                    endpoint.queryParameter("id").orEmpty().matches(Regex("[0-9]{1,20}")) &&
+                    endpoint.queryParameter("safeid").orEmpty().matches(Regex("[a-zA-Z0-9]{1,64}")) &&
+                    action.id == "halo:buy:${endpoint.queryParameter("id")}"
+            else -> false
+        }
+    }
+
+    private suspend fun executeSubpageReward(action: RewardAction): RewardExecutionResult {
+        return try {
+            val response = if (action.protocol == RewardProtocol.GET_LINK) {
+                raw(action.endpoint, followRedirects = false, referer = action.sourceUrl)
+            } else {
+                val body = gbkFormValues(action.fields).toRequestBody("application/x-www-form-urlencoded".toMediaType())
+                raw(action.endpoint, referer = action.sourceUrl, customBody = body)
+            }
+            val text = response.html.trim()
+            when {
+                text.equals("no", true) -> RewardExecutionResult.Rejected("站点未执行本次操作")
+                text.contains("失败") || text.contains("错误") || text.contains("不足") ->
+                    RewardExecutionResult.Rejected("站点拒绝了本次操作；请刷新页面核对")
+                else -> RewardExecutionResult.Uncertain("服务器已接收本次操作，请刷新页面核对结果；不会自动重试")
+            }
+        } catch (e: CancellationException) { throw e
+        } catch (_: Exception) {
+            RewardExecutionResult.Uncertain("操作结果无法确认，请刷新页面核对；不会自动重试")
+        }
+    }
+
+    override suspend fun exportMessages(request: MessageExportRequest): MessageExportResult = withContext(Dispatchers.IO) {
+        if (!sameOrigin(request.sourceUrl) || !sameOrigin(request.form.actionUrl)) {
+            return@withContext MessageExportResult.Rejected("消息导出目标不可信")
+        }
+        if (destination(request.sourceUrl).effect != SiteEffect.READ) {
+            return@withContext MessageExportResult.Rejected("消息来源页不是只读列表，未导出")
+        }
+        val freshPage = try { fetch(request.sourceUrl) } catch (e: CancellationException) { throw e
+        } catch (_: Exception) { null }
+            ?: return@withContext MessageExportResult.Rejected("无法重新读取消息列表，本次未导出")
+        if (freshPage.authStatus != AuthStatus.AUTHENTICATED || !isSamePageList(request.sourceUrl, freshPage.url)) {
+            return@withContext MessageExportResult.Rejected("消息列表登录或来源状态已变化，本次未导出")
+        }
+        val fresh = freshPage.nativePage?.forms?.firstOrNull { it.id == request.form.id }
+            ?: return@withContext MessageExportResult.Rejected("消息导出表单已变化，请刷新后重试")
+        val box = fresh.hidden.firstOrNull { it.name == "towhere" }?.value.orEmpty()
+        if (box !in setOf("receivebox", "sendbox", "scout") ||
+            fresh.actionUrl.toHttpUrl().encodedPath != "/message.php" ||
+            fresh.method.uppercase() != "POST") {
+            return@withContext MessageExportResult.Rejected("消息导出协议已变化")
+        }
+        val down = fresh.fields.firstOrNull { it.name == "action" && it.kind == SiteFieldKind.RADIO }
+            ?.options?.any { it.value == "down" } == true
+        if (!down) return@withContext MessageExportResult.Rejected("站点不再提供下载选项")
+        val checkboxFields = fresh.fields.filter { it.name == "delid[]" }
+        val available = checkboxFields.flatMap { field -> field.options.map { it.value } }.toSet()
+        val selected = request.values.filter { it.name == "delid[]" }.map { it.value }
+        if (selected.any { it !in available }) {
+            return@withContext MessageExportResult.Rejected("所选消息已变化，请刷新列表后重试")
+        }
+        if (checkboxFields.isNotEmpty() && selected.isEmpty()) {
+            return@withContext MessageExportResult.Rejected("请选择要导出的消息")
+        }
+        val values = fresh.hidden.filterNot { it.name == "action" }.toMutableList()
+        selected.distinct().forEach { values.add(FormValue("delid[]", it)) }
+        values.add(FormValue("action", "down"))
+        try {
+            val body = gbkFormValues(values).toRequestBody("application/x-www-form-urlencoded".toMediaType())
+            client.newCall(Request.Builder().url(fresh.actionUrl)
+                .header("Referer", request.sourceUrl)
+                .header("User-Agent", "KFMobile/0.1 (Android; native client)")
+                .post(body).build()).execute().use { response ->
+                if (response.code in listOf(301, 302, 303, 307, 308)) {
+                    val location = response.header("Location").orEmpty()
+                    return@withContext if (location.contains("login.php")) MessageExportResult.Rejected("登录状态已失效，请重新登录")
+                    else MessageExportResult.Uncertain("站点返回了跳转而不是文件；请核对后重试，客户端不会重复提交")
+                }
+                if (!response.isSuccessful) return@withContext MessageExportResult.Rejected("消息导出失败：HTTP ${response.code}")
+                val contentType = response.header("Content-Type").orEmpty()
+                val bodyBytes = response.body?.byteStream()?.readBounded(16 * 1024 * 1024 + 1)
+                    ?: return@withContext MessageExportResult.Rejected("消息导出内容为空")
+                if (bodyBytes.size > 16 * 1024 * 1024) return@withContext MessageExportResult.Rejected("消息导出内容超过 16 MB")
+                if (contentType.contains("text/html", true)) {
+                    val doc = parser.document(decodePageBytes(bodyBytes, response.body?.contentType()?.charset()?.name(), null), response.request.url.toString())
+                    val message = parser.responseMessage(doc)
+                    if (doc.select("input[name=pwuser]").isNotEmpty() || response.request.url.toString().contains("login.php")) {
+                        MessageExportResult.Rejected("登录状态已失效，请重新登录")
+                    } else MessageExportResult.Uncertain(message.ifBlank { "站点返回网页而不是文件；导出结果未确认" }.take(240))
+                } else {
+                    val fileName = attachmentFileName(response.header("Content-Disposition"), box)
+                    MessageExportResult.Success(fileName, bodyBytes, contentType.ifBlank { "application/octet-stream" })
+                }
+            }
+        } catch (e: CancellationException) { throw e
+        } catch (_: Exception) {
+            MessageExportResult.Uncertain("消息导出请求结果无法确认；请先核对，客户端不会自动重试")
+        }
+    }
+
+    private fun attachmentFileName(disposition: String?, box: String): String {
+        val encoded = Regex("""filename\*=UTF-8''([^;]+)""", RegexOption.IGNORE_CASE).find(disposition.orEmpty())
+            ?.groupValues?.get(1)
+            ?.let { runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrNull() }
+        val plain = Regex("""filename="?([^";]+)"?""", RegexOption.IGNORE_CASE).find(disposition.orEmpty())
+            ?.groupValues?.get(1)?.trim()?.removeSurrounding("\"")
+        val raw = encoded ?: plain
+        val fallback = "messages-${box.ifBlank { "export" }}.txt"
+        return raw?.replace(Regex("[\\\\/:*?\"<>|\\r\\n]"), "_")?.trim()?.take(120)
+            ?.takeIf { it.isNotBlank() } ?: fallback
+    }
+
+    override suspend fun gugu(): GuguSnapshot? = guguMutex.withLock {
         val loginUrl = try {
             // The forum issues an official, signed redirect for the external
             // game. The redirect is validated and no forum cookie is sent to it.
             client.newCall(Request.Builder().url(resolve("fyg_sjcdwj.php?go=play&xl=2"))
                 .header("User-Agent", "KFMobile/0.1 (Android; native client)").header("Referer", "$origin/")
                 .header("Accept", "text/html").build()).execute().use { response ->
-                if (response.code !in listOf(301, 302, 303, 307, 308)) return@withContext null
-                response.header("Location")
+                if (response.code in listOf(301, 302, 303, 307, 308)) response.header("Location") else null
             }
-        } catch (_: Exception) { null } ?: return@withContext null
-        GuguProtocol().load(loginUrl)
+        } catch (_: Exception) { null }
+        if (loginUrl == null) return@withLock null
+        val protocol = GuguProtocol()
+        protocol.load(loginUrl)?.also { guguProtocol = protocol }
+    }
+
+    override suspend fun guguAction(request: GuguActionRequest): GuguActionResult = guguMutex.withLock {
+        guguProtocol?.perform(request) ?: GuguActionResult.Rejected("请先读取咕咕镇后再操作")
     }
 
 

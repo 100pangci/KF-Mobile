@@ -10,6 +10,12 @@ import org.jsoup.nodes.TextNode
 /** HTML is a transport format only. Controls become native Compose models. */
 class NativeSiteParser(private val origin: String, private val html: ForumHtmlParser) {
     private val routes = SiteRoutePolicy(origin)
+    private val numericId = Regex("[0-9]{1,12}")
+    private val safeToken = Regex("[0-9a-zA-Z]{4,64}")
+    private val cztzCall = Regex("""^cztzyx\(\s*['"]?([0-9]{1,12})['"]?\s*,\s*['"]?([0-9]{1,12}|tpc)['"]?\s*\)$""")
+    private val readMoveCall = Regex("""^readadmove\(\s*['"]?([0-9]{1,12})['"]?\s*\)$""")
+    private val hideReplyCall = Regex("""^rpidnk\(\s*['"]?([0-9]{1,12})['"]?\s*,\s*['"]?([0-9]{1,12})['"]?\s*\)$""")
+    private val adminTipCall = Regex("""^radtip\(\s*['"]?([0-9A-Za-z_]{1,32})['"]?\s*,\s*['"]?([0-9]{1,12})['"]?\s*,\s*['"]?([0-9]{1,12})['"]?\s*\)$""")
     fun parse(doc: Document, sourceUrl: String): NativeSitePage {
         val source = sourceUrl.toHttpUrl()
         val path = source.pathSegments.lastOrNull().orEmpty()
@@ -21,7 +27,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         main.select("img[src*=ys/top]").forEach { it.parent()?.remove() }
         val title = when (path) {
             "profile.php" -> when (action) { "modify" -> "修改资料"; "favor" -> "收藏管理"; else -> "会员资料" }
-            "message.php" -> when (action) { "read" -> "私信内容"; "banned" -> "屏蔽列表"; "scout" -> "消息跟踪"; "sendbox" -> "发件箱"; else -> "消息管理" }
+            "message.php" -> when (action) { "read" -> "私信内容"; "readscout" -> "跟踪详情"; "banned" -> "屏蔽列表"; "scout" -> "消息跟踪"; "sendbox" -> "发件箱"; else -> "消息管理" }
             "hack.php" -> when {
                 action == "log" -> "银行日志"
                 source.queryParameter("H_name") == "bank" -> "贡献与银行"
@@ -31,6 +37,11 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             "kf_growup.php" -> "签到与成长"
             "kf_fw_1wkfb.php" -> "评分与记录"
             "kf_fw_ig_index.php" -> "争夺奖励"
+            "kf_fw_ig_mybp.php" -> "我的物品"
+            "kf_fw_ig_halo.php" -> "战力光环"
+            "kf_fw_ig_pklist.php" -> "争夺排行"
+            "kf_fw_ig_shop.php" -> "物品商店"
+            "kf_fw_ig_readme.php" -> "争夺帮助"
             "kf_lv200.php" -> "进度分"
             "fyg_sjcdwj.php" -> "咕咕镇"
             "guanjianci.php" -> "被 @ 记录"
@@ -42,27 +53,121 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val forms = mainOriginal.select("form").filterNot { it.attr("action").startsWith("search.php") || it.attr("name") == "delatc" || it.attr("name") == "preview" }
             .mapIndexedNotNull { index, form -> parseForm(form, sourceUrl, "$path:$index", title) }
             .toMutableList()
+        val messageExport = if (path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout")) {
+            forms.firstNotNullOfOrNull { form ->
+                val box = form.hidden.firstOrNull { it.name == "towhere" }?.value.orEmpty()
+                val down = form.fields.any { field ->
+                    field.name == "action" && field.options.any { it.value == "down" }
+                }
+                val hasSelection = form.fields.any { it.name == "delid[]" }
+                if (!down || box !in setOf("receivebox", "sendbox", "scout")) null
+                else NativeMessageExport(
+                    formId = form.id,
+                    box = box,
+                    label = when {
+                        hasSelection -> "导出所选消息"
+                        box == "scout" -> "导出全部跟踪消息"
+                        else -> "导出消息"
+                    },
+                    requiresSelection = hasSelection,
+                )
+            }
+        } else null
+        // The mailbox's "清空" link is a scripted GET with a per-session code,
+        // not an anchor. Keep it as a CHANGE destination so the native client
+        // can show the site's irreversible warning and obtain confirmation.
+        val messageClear = if (path == "message.php") {
+            Regex("""message\.php\?action=clear(?:&(?:amp;)?ckcode=([0-9a-zA-Z]{4,128}))?""")
+                .find(doc.html())?.value?.replace("&amp;", "&")
+                ?.let { html.resolve(it, sourceUrl) }
+                ?.toHttpUrlOrNull()
+                ?.takeIf { target ->
+                    target.encodedPath == "/message.php" && target.queryParameter("action") == "clear" &&
+                        target.queryParameterNames.all { it in setOf("action", "ckcode") } &&
+                        (target.queryParameter("ckcode") == null ||
+                            target.queryParameter("ckcode")?.matches(Regex("[0-9a-zA-Z]{4,128}")) == true)
+                }
+                ?.let { routes.classify(it.toString(), "清空全部消息").takeIf { link -> link.effect == SiteEffect.CHANGE } }
+        } else null
         if (path == "read.php") {
-            val tid = doc.selectFirst("#tui_tid")?.attr("value").orEmpty()
-            val safe = doc.selectFirst("#safeid")?.attr("value").orEmpty()
-            if (tid == source.queryParameter("tid") && tid.matches(Regex("[0-9]+")) && safe.isNotBlank() && doc.selectFirst("#read_tui") != null) {
+            val sourceTid = source.queryParameter("tid").orEmpty()
+            val tid = doc.selectFirst("#tui_tid")?.attr("value").orEmpty().ifBlank { sourceTid }
+            val safe = doc.selectFirst("#safeid")?.attr("value")?.trim().orEmpty()
+                .takeIf { it.matches(safeToken) }.orEmpty()
+            if (tid == sourceTid && tid.matches(numericId) && safe.isNotBlank() && doc.selectFirst("#read_tui") != null) {
                 forms.add(SiteForm("rpc:recommend", "推荐此帖", sourceUrl, "$origin/diy_read_tui.php", "POST",
                     listOf(FormValue("tid", tid), FormValue("safeid", safe)), emptyList(), listOf(SiteSubmit("推荐此帖", null, "")),
                     warning = "推荐按站点规则执行，可能消耗余额或次数。请确认，不会自动连续推荐。"))
             }
+            forms.addAll(readAdminForms(doc, sourceUrl, sourceTid, safe))
         }
-        val profile = if (path == "profile.php" && action == "show") parseProfile(mainOriginal, sourceUrl) else null
+        // show.php?uid= uses the same log1 detail table as profile.php?action=show;
+        // it is linked from reader author boxes and previously fell back to a
+        // raw section that dropped the avatar and the author actions.
+        val profile = if ((path == "profile.php" && action == "show") || path == "show.php") {
+            parseProfile(mainOriginal, sourceUrl)
+        } else null
         val growth = if (path == "kf_growup.php") parseGrowth(mainOriginal, sourceUrl) else null
+        // Parse dedicated wire actions before the generic control scan so that
+        // controls already owned by a native adapter are not also reported as
+        // unavailable in the fallback block.
+        val rewards = parseRewardActions(path, mainOriginal, sourceUrl)
         val work = main.clone()
         work.select("form label").remove()
         work.select("form").unwrap()
         val unsupported = mutableListOf<String>()
-        if (path == "fyg_sjcdwj.php") unsupported.add("咕咕镇战斗、背包及动态脚本界面仍需专项原生适配")
+        if (path == "fyg_sjcdwj.php") unsupported.add("咕咕镇使用独立游戏会话：角色、背包、战绩、商店、道具使用菜单、礼物、翻牌、许愿池、宝石工坊、属性分配、光环天赋、满级提升、单场骰子战争与改名的可见单步控件已原生接入并逐项确认；无法识别的控件保持只读")
+        // Reader pages carry script helpers for actions that already have a
+        // native entry: postreply() opens the same reply form as the visible
+        // post.php reply link, and cztz(floorN) only toggles the hidden action
+        // row whose links are parsed separately. Listing them as unsupported
+        // would tell the user that a working action is missing.
+        val hasReplyLink = work.select("a[href]").any { a ->
+            val href = a.attr("href")
+            href.contains("post.php") && href.contains("action=reply")
+        }
         val buttonLinks = work.select("input[type=button], button, a[onclick]").mapNotNull { control ->
             val label = control.attr("value").ifBlank { control.text() }.trim().take(100)
             if (label.isBlank()) return@mapNotNull null
             val js = control.attr("onclick").removePrefix("javascript:").trim()
-            if (js.startsWith("UpLoadFace(")) { unsupported.add("头像上传（ajaxface 脚本尚待适配）"); return@mapNotNull null }
+            if ((js.startsWith("postreply(") && hasReplyLink) || js.startsWith("cztz(")) return@mapNotNull null
+            // The native mailbox selection has its own "clear this page"
+            // control; the site's scripted clear is a local checkbox reset.
+            if (js.contains("checkset(")) return@mapNotNull null
+            // Editor emoticon controls: the native editor already loads the
+            // full catalog, including the quick-reply row and the "more" link.
+            if (js.startsWith("showDefault(") || (path == "read.php" && hasReplyLink && label.matches(Regex("""^\[.+\]$""")))) {
+                return@mapNotNull null
+            }
+            // 争夺 dashboard: one-step battle is a RewardAction, the local
+            // attribute toggle is already rendered, and the "until end" loop
+            // plus its local pause are replaced by repeated single-step
+            // actions with a confirmation each time.
+            if (path == "kf_fw_ig_index.php" && (
+                    js.contains(".toggle()") ||
+                        (Regex("""^jgjg\(\s*['"]?(?:1|99)['"]?\s*\)$""").matches(js) &&
+                            rewards.any { it.kind == "battle-step" }) ||
+                        Regex("""^jgtz\([^)]*\)$""").matches(js)
+                    )
+            ) return@mapNotNull null
+            // Item/equipment pages: these controls are already exposed as
+            // RewardActions with their exact captured wire shape.
+            if (path == "kf_fw_ig_mybp.php" &&
+                Regex("""^(?:sywp|cswp|dkhz|cdzb|rlzb_qr)\([^)]*\)$""").matches(js) &&
+                rewards.any { it.kind.startsWith("mybp:") }
+            ) return@mapNotNull null
+            if (path == "kf_fw_ig_shop.php" && Regex("""^gmwp\([^)]*\)$""").matches(js) &&
+                rewards.any { it.kind == "shop:buy" }
+            ) return@mapNotNull null
+            if (path == "read.php") parseReadAdminCall(js)?.let { call ->
+                if (forms.any { it.id == call.formId }) return@mapNotNull null
+            }
+            if (js.startsWith("UpLoadFace(")) {
+                // Profile settings owns a dedicated Photo Picker uploader, so
+                // do not tell the user that avatar upload is unsupported there.
+                if (!(path == "profile.php" && action == "modify")) unsupported.add("头像上传（请到资料设置页使用原生上传）")
+                return@mapNotNull null
+            }
             if (control.id() == "read_tui" && forms.any { it.id == "rpc:recommend" }) return@mapNotNull null
             if (control.hasAttr("href") && !control.attr("href").startsWith("javascript:", true)) return@mapNotNull null
             if (control.tagName() == "button" && control.attr("type").lowercase() !in listOf("button", "reset") && control.closest("form") != null) return@mapNotNull null
@@ -78,6 +183,14 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             // new explanatory rows or unrelated tables introduced by the server.
             if (row.select("input,textarea,select,button").isNotEmpty()) row.remove()
         }
+        // Several feature pages (notably the 争夺 dashboard) display state with
+        // readonly inputs instead of text. Preserve those values before the
+        // generic input cleanup so the fallback does not silently lose them.
+        work.select("input[readonly], input[disabled]").forEach { input ->
+            if (input.attr("type").lowercase() == "hidden") return@forEach
+            val value = input.attr("value").trim()
+            if (value.isNotBlank()) input.replaceWith(Element("span").text(value))
+        }
         work.select("input,textarea,select,button,iframe,object,embed").remove()
         work.select("a[onclick],a[href^=javascript:]").forEach { it.remove() }
         var messageBody: String? = null
@@ -91,7 +204,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
                 if (links.any { it.contains("message.php?action=receivebox") } &&
                     links.any { it.contains("message.php?action=sendbox") }) table.remove()
             }
-            if (action == "read") {
+            if (action in setOf("read", "readscout")) {
                 val rows = work.select("tr").toList()
                 val optionIndex = rows.indexOfLast { row ->
                     val cells = row.select("> td")
@@ -167,7 +280,10 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         }
         val usefulLinks = links.filterNot { link ->
             (path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php")) ||
-                link.url.toHttpUrlOrNull()?.let { it.encodedPath == "/kf_fw_1wkfb.php" && it.queryParameter("do") == "1" } == true
+                link.url.toHttpUrlOrNull()?.let { it.encodedPath == "/kf_fw_1wkfb.php" && it.queryParameter("do") == "1" } == true ||
+                link.url.toHttpUrlOrNull()?.let {
+                    it.encodedPath == "/kf_fw_ig_halo.php" && it.queryParameter("do") == "buy"
+                } == true
         }
         val messages = if (path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout")) {
             mainOriginal.select("a[href*='message.php?']").mapNotNull { a ->
@@ -187,7 +303,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val blocklist = if (path == "message.php" && action == "banned") forms.firstNotNullOfOrNull { form ->
             form.fields.singleOrNull { it.name == "banidinfo" && it.kind == SiteFieldKind.MULTILINE }?.let { NativeBlocklist(form.id, it.id) }
         } else null
-        val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal) else null
+        val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal, sourceUrl) else null
         val statusTimeline = when {
             path == "kf_fw_1wkfb.php" -> parseStatusTimeline(mainOriginal, sourceUrl)
             path == "kf_growup.php" && growth != null -> NativeStatusTimeline("签到与成长", listOf(
@@ -208,13 +324,13 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             else -> null
         }
         val bankLog = if (path == "hack.php" && action == "log") parseBankLog(mainOriginal, sourceUrl) else null
-        val rewards = parseRewardActions(path, mainOriginal, sourceUrl)
         val messageList = path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout") && mainOriginal.select("tr").any { row ->
             row.select(">td,>th").map { it.text().trim() }.containsAll(listOf("标题", "发件人", "收件人"))
         }
         return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth,
             messages, message, favorites, bank, blocklist, progress, messageList,
-            statusTimeline = statusTimeline, bankLog = bankLog, rewards = rewards)
+            statusTimeline = statusTimeline, bankLog = bankLog, rewards = rewards,
+            messageClear = messageClear, messageExport = messageExport)
     }
 
     /**
@@ -493,7 +609,12 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val claimUrl = claimAnchor?.attr("href")?.let { html.resolve(it, url) }
         val hasClaimForm = status?.selectFirst("form") != null
         val statusText = status?.text().orEmpty()
-        val claimed = Regex("已签到|已领取|今日完成|已完成").containsMatchIn(statusText)
+        // The site's claimed state reads "今天的每日奖励已经领过了，请明天继续。"
+        // (no anchor at all), so match the actual wording instead of only the
+        // short "已领取" form. This div is the dedicated status line, not the
+        // rules prose above it.
+        val claimed = Regex("已签到|已经签到|已签过|已领取|已经领取|已领过|已经领过|领过了|今日完成|已完成")
+            .containsMatchIn(statusText)
         val claimStatus = when {
             claimed -> StatusKind.COMPLETED
             claimUrl != null || hasClaimForm -> StatusKind.AVAILABLE
@@ -531,7 +652,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val links = table.select("a[href]").mapNotNull { a ->
             val label = a.text().trim().take(40).ifBlank { a.attr("title").take(40) }
             if (label.isBlank()) null else html.resolve(a.attr("href"), url)?.let { routes.classify(it, label) }
-        }.distinctBy { it.url }
+        }.filterNot { it.url == url }.distinctBy { it.url }
         return NativeProfile(name, avatar, info, links, headline, stats)
     }
 
@@ -577,7 +698,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         return NativeBank(balances.distinctBy { it.label }, rules.distinct(), links)
     }
 
-    private fun parseProgress(main: Element): NativeProgress? {
+    private fun parseProgress(main: Element, sourceUrl: String): NativeProgress? {
         // Observed template: a numeric span following the explicit score label.
         // Do not derive eligibility, thresholds or timelines from prose/rules.
         val score = main.select("span,b,strong").firstOrNull { element ->
@@ -589,7 +710,43 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         // No normal status/timeline template has been verified. These words
         // can also appear as examples in rules; keep them in fallback prose,
         // never promote them to account eligibility or reward state.
-        return NativeProgress(listOf(NativeInfo("当前进度分", score.text().trim())))
+        return NativeProgress(
+            stats = listOf(NativeInfo("当前进度分", score.text().trim())),
+            penalties = parseProgressPenalties(main, sourceUrl),
+        )
+    }
+
+    /**
+     * Observed dedicated block: "我的扣分记录" heading followed by repeated
+     * `[4年前][扣40进度分][回帖]<a>《标题》</a><br>扣分原因：…<br><hr>` entries.
+     * Only parse this explicit template; never infer penalties from prose.
+     */
+    private fun parseProgressPenalties(main: Element, sourceUrl: String): List<NativeProgressPenalty> {
+        val heading = main.select("span").firstOrNull { it.text().contains("扣分记录") } ?: return emptyList()
+        val container = heading.parent() ?: return emptyList()
+        val pattern = Regex("^\\[([^\\]]{1,40})]\\[([^\\]]{1,40})]\\[([^\\]]{1,40})]")
+        return container.select("span").mapNotNull { span ->
+            val match = pattern.find(span.text().trim()) ?: return@mapNotNull null
+            val link = span.selectFirst("a[href]") ?: return@mapNotNull null
+            val reason = StringBuilder()
+            var node: Node? = span.nextSibling()
+            while (node != null) {
+                when {
+                    node is TextNode -> reason.append(node.text())
+                    node is Element && node.tagName() in setOf("hr", "span") -> break
+                }
+                node = node.nextSibling()
+            }
+            NativeProgressPenalty(
+                time = match.groupValues[1].trim(),
+                points = match.groupValues[2].trim(),
+                action = match.groupValues[3].trim(),
+                title = link.text().trim(),
+                reason = reason.toString().replace(' ', ' ').trim()
+                    .removePrefix("扣分原因：").removePrefix("扣分原因:").trim(),
+                url = html.resolve(link.attr("href"), sourceUrl).orEmpty(),
+            )
+        }.distinctBy { listOf(it.time, it.points, it.action, it.title, it.reason) }
     }
 
     private fun parseStatusTimeline(main: Element, sourceUrl: String): NativeStatusTimeline? {
@@ -605,25 +762,50 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             val rowText = cells.drop(2).joinToString(" · ") { it.text().trim() }
             val allLinks = row.select("a[href]").mapNotNull { a ->
                 val href = html.resolve(a.attr("href"), sourceUrl) ?: return@mapNotNull null
-                val label = a.text().trim().take(40)
-                if (label.isBlank() || label == title) null else routes.classify(href, label)
+                // `do=1&ptid=` is the site's entry into the rating workflow, not
+                // a one-shot reward claim: the server opens (or resumes) that
+                // post's rating page. Present it honestly and let the normal
+                // change confirmation/navigation flow own it.
+                val target = href.toHttpUrlOrNull()
+                val ratingEntry = target?.encodedPath == "/kf_fw_1wkfb.php" && target.queryParameter("do") == "1"
+                val label = if (ratingEntry) {
+                    "进入评分"
+                } else {
+                    a.text().trim().take(40).ifBlank { a.attr("title").take(40) }
+                }
+                if (label.isBlank() || label == title) null else {
+                    val destination = routes.classify(href, label)
+                    if (ratingEntry) destination.copy(explanation = "站点会建立或恢复该帖的评分会话，并显示评分表单。")
+                    else destination
+                }
             }.distinctBy { it.url }
-            val action = allLinks.firstOrNull { it.url.contains("kf_fw_1wkfb.php?do=1") }
-                ?: allLinks.firstOrNull { it.url.contains("kf_fw_1wkfb.php?do=2") }
-                ?: allLinks.firstOrNull { it.effect == SiteEffect.CHANGE }
             val status = when {
-                rowText.contains("已完成") || rowText.contains("已领取") -> StatusKind.COMPLETED
+                rowText.contains("有评分记录") || rowText.contains("已完成") || rowText.contains("已领取") -> StatusKind.COMPLETED
+                rowText.contains("评分进程") || rowText.contains("正在被评分") || rowText.contains("待检查") ||
+                    rowText.contains("待审核") || rowText.contains("待处理") -> StatusKind.WAITING
+                rowText.contains("未评分") -> StatusKind.AVAILABLE
                 rowText.contains("已过期") || rowText.contains("过期") -> StatusKind.EXPIRED
                 rowText.contains("失败") || rowText.contains("未通过") || rowText.contains("驳回") -> StatusKind.FAILED
-                rowText.contains("待检查") || rowText.contains("待审核") || rowText.contains("待处理") -> StatusKind.WAITING
-                action?.url?.contains("kf_fw_1wkfb.php?do=1") == true || rowText.contains("可领取") -> StatusKind.AVAILABLE
+                rowText.contains("可领取") -> StatusKind.AVAILABLE
+                allLinks.any { it.isRewardLink("1") } -> StatusKind.AVAILABLE
                 else -> StatusKind.UNKNOWN
             }
+            // A completed rating has no action left on the site (the link only
+            // renders an "already recorded" notice), so do not advertise one.
+            val action = if (status == StatusKind.COMPLETED) null else
+                allLinks.firstOrNull { it.isRewardLink("2") }
+                    ?: allLinks.firstOrNull { it.effect == SiteEffect.CHANGE }
+                    ?: allLinks.firstOrNull { it.isRewardLink("1") }
             val related = link?.let { a -> html.resolve(a.attr("href"), sourceUrl) }.orEmpty()
             entries.add(StatusTimelineEntry(title, status, time, rowText, related, action))
         }
         val distinct = entries.distinctBy { it.time to it.title to it.status }.take(100)
         return if (distinct.isEmpty()) null else NativeStatusTimeline("评分与奖励记录", distinct)
+    }
+
+    private fun SiteDestination.isRewardLink(doValue: String): Boolean {
+        val url = url.toHttpUrlOrNull() ?: return false
+        return url.encodedPath == "/kf_fw_1wkfb.php" && url.queryParameter("do") == doValue
     }
 
     private fun parseBankLog(main: Element, sourceUrl: String): NativeBankLog {
@@ -684,46 +866,253 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
 
     private fun parseRewardActions(path: String, main: Element, sourceUrl: String): List<RewardAction> {
         val result = mutableListOf<RewardAction>()
-        if (path == "kf_fw_1wkfb.php") {
-            main.select("a[href]").forEach { a ->
-                val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
-                val url = target.toHttpUrlOrNull() ?: return@forEach
-                if (url.encodedPath != "/kf_fw_1wkfb.php" || url.queryParameter("do") != "1" ||
-                    url.queryParameterNames != setOf("do", "safeid", "ptid") ||
-                    url.queryParameterNames.any { url.queryParameterValues(it).size != 1 }) return@forEach
-                val safeid = url.queryParameter("safeid").orEmpty()
-                val ptid = url.queryParameter("ptid").orEmpty()
-                if (!safeid.matches(Regex("[a-zA-Z0-9]{1,64}")) || !ptid.matches(Regex("[0-9]{1,20}"))) return@forEach
-                result.add(RewardAction(
-                    id = "claim:$ptid",
-                    title = a.text().trim().take(80).ifBlank { "获取评分奖励" },
-                    protocol = RewardProtocol.GET_LINK,
-                    endpoint = target,
-                    method = "GET",
-                    fields = emptyList(),
-                    sourceUrl = sourceUrl,
-                ))
-            }
-        }
         if (path == "kf_fw_ig_index.php") {
             val safeid = Regex("data\\s*:\\s*['\"]safeid=([a-zA-Z0-9]{1,64})['\"]").find(main.outerHtml())
                 ?.groupValues?.get(1)
                 ?: main.selectFirst("input[name=safeid]")?.attr("value")?.takeIf { it.matches(Regex("[a-zA-Z0-9]{1,64}")) }
-            if (safeid != null && main.selectFirst("button[onclick*=jgjg]") != null) {
+            // Real template uses anchors (`<a href="javascript:;" onclick="jgjg('1')">`),
+            // not buttons. Prefer the single-step entry; never bind the
+            // client-side "until end" loop (jgjg('99')).
+            val step = main.selectFirst("[onclick*=\"jgjg('1')\"]")
+                ?: main.select("a[onclick*=jgjg], button[onclick*=jgjg]").firstOrNull()
+            if (safeid != null && step != null) {
                 // The site implements "until end" as a client-side setTimeout
                 // loop. Only expose one server step; never auto-repeat.
                 result.add(RewardAction(
                     id = "battle-step",
-                    title = "战斗（前进一层楼）",
+                    title = step.text().trim().take(40).ifBlank { "战斗（前进一层楼）" },
                     protocol = RewardProtocol.AJAX_POST,
                     endpoint = "$origin/kf_fw_ig_intel.php",
                     method = "POST",
                     fields = listOf(FormValue("safeid", safeid)),
                     sourceUrl = sourceUrl,
+                    kind = "battle-step",
                 ))
             }
         }
+        if (path == "kf_fw_ig_mybp.php") {
+            // My-items page: every write is an inline jQuery POST to
+            // kf_fw_ig_mybpdt.php. Only expose functions whose body and visible
+            // control match the captured do/id/safeid wire exactly.
+            val script = main.select("script").joinToString("\n") { it.data() }
+            val safeid = Regex("safeid=([a-zA-Z0-9]{1,64})").find(script)?.groupValues?.get(1)
+            val functions = listOf(
+                "sywp" to "1", "cswp" to "2", "dkhz" to "3", "cdzb" to "4", "rlzb_qr" to "5",
+            )
+            if (safeid != null) {
+                functions.forEach { (fn, doValue) ->
+                    val body = scriptFunction(script, fn) ?: return@forEach
+                    val wire = Regex("""do=$doValue&id="\s*\+\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*"&safeid=$safeid""")
+                    if (!body.contains("kf_fw_ig_mybpdt.php") || !wire.containsMatchIn(body)) return@forEach
+                    main.select("a[onclick], button[onclick]").forEach { control ->
+                        val call = Regex("""^${Regex.escape(fn)}\(\s*'?([0-9]{1,20})'?\s*\)$""")
+                            .find(control.attr("onclick").trim()) ?: return@forEach
+                        val id = call.groupValues[1]
+                        val title = control.text().trim().take(60).ifBlank {
+                            when (doValue) {
+                                "1" -> "使用物品"
+                                "2" -> "出售物品"
+                                "3" -> "打开盒子"
+                                "4" -> "装备卡片"
+                                else -> "熔炼卡片"
+                            }
+                        }
+                        result.add(RewardAction(
+                            id = "mybp:$doValue:$id",
+                            title = title,
+                            protocol = RewardProtocol.AJAX_POST,
+                            endpoint = "$origin/kf_fw_ig_mybpdt.php",
+                            method = "POST",
+                            fields = listOf(
+                                FormValue("do", doValue),
+                                FormValue("id", id),
+                                FormValue("safeid", safeid),
+                            ),
+                            sourceUrl = sourceUrl,
+                            kind = "mybp:$doValue",
+                            confirmation = if (doValue == "5") {
+                                "熔炼后增加装备经验值，但该装备会消失；确认继续？"
+                            } else {
+                                "该操作会改变奖励或道具状态；确认继续？"
+                            },
+                        ))
+                    }
+                }
+            }
+        }
+        if (path == "kf_fw_ig_shop.php") {
+            // Item shop: gmwp(id) posts buy=<id>&safeid=<token> to this page.
+            val script = main.select("script").joinToString("\n") { it.data() }
+            val safeid = Regex("safeid=([a-zA-Z0-9]{1,64})").find(script)?.groupValues?.get(1)
+            val body = scriptFunction(script, "gmwp")
+            val wire = Regex("""buy="\s*\+\s*[A-Za-z_][A-Za-z0-9_]*\s*\+\s*"&safeid=$safeid""")
+            if (safeid != null && body != null && body.contains("kf_fw_ig_shop.php") && wire.containsMatchIn(body)) {
+                main.select("a[onclick], button[onclick]").forEach { control ->
+                    val call = Regex("""^gmwp\(\s*'?([0-9]{1,20})'?\s*\)$""")
+                        .find(control.attr("onclick").trim()) ?: return@forEach
+                    val id = call.groupValues[1]
+                    result.add(RewardAction(
+                        id = "shop:buy:$id",
+                        title = control.text().trim().take(60).ifBlank { "购买物品" },
+                        protocol = RewardProtocol.AJAX_POST,
+                        endpoint = "$origin/kf_fw_ig_shop.php",
+                        method = "POST",
+                        fields = listOf(FormValue("buy", id), FormValue("safeid", safeid)),
+                        sourceUrl = sourceUrl,
+                        kind = "shop:buy",
+                        confirmation = "购买会消耗 KFB 或贡献；确认继续？",
+                    ))
+                }
+            }
+        }
+        if (path == "kf_fw_ig_halo.php") {
+            // Halo upgrades are GET links with do=buy&id=<id>&safeid=<token>.
+            main.select("a[href]").forEach { a ->
+                val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
+                val url = target.toHttpUrlOrNull() ?: return@forEach
+                if (url.encodedPath != "/kf_fw_ig_halo.php" || url.queryParameter("do") != "buy" ||
+                    url.queryParameterNames != setOf("do", "id", "safeid") ||
+                    url.queryParameterNames.any { url.queryParameterValues(it).size != 1 }) return@forEach
+                val id = url.queryParameter("id").orEmpty()
+                val safeid = url.queryParameter("safeid").orEmpty()
+                if (!id.matches(Regex("[0-9]{1,20}")) || !safeid.matches(Regex("[a-zA-Z0-9]{1,64}"))) return@forEach
+                result.add(RewardAction(
+                    id = "halo:buy:$id",
+                    title = a.text().trim().take(60).ifBlank { "购买光环" },
+                    protocol = RewardProtocol.GET_LINK,
+                    endpoint = target,
+                    method = "GET",
+                    fields = emptyList(),
+                    sourceUrl = sourceUrl,
+                    kind = "halo:buy",
+                    confirmation = "购买会消耗贡献或 KFB；确认继续？",
+                ))
+            }
+        }
+        return result.distinctBy { it.id }
+    }
+
+    /** Extract a top-level JS function body without executing the script. */
+    private fun scriptFunction(script: String, name: String): String? {
+        val match = Regex("""function\s+${Regex.escape(name)}\s*\([^)]*\)\s*\{""").find(script) ?: return null
+        val open = script.indexOf('{', match.range.first)
+        if (open < 0) return null
+        var depth = 0
+        var index = open
+        while (index < script.length) {
+            when (script[index]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return script.substring(open, index + 1)
+                }
+            }
+            index++
+        }
+        return null
+    }
+
+    private data class ReadAdminCall(
+        val kind: String,
+        val tid: String,
+        val pid: String = "",
+        val addo: String = "",
+    ) {
+        val formId: String
+            get() = when (kind) {
+                "cztz" -> "rpc:cztz:$pid"
+                "admove" -> "rpc:admove"
+                "hide" -> "rpc:hide:$pid"
+                else -> "rpc:tip:$addo:$pid"
+            }
+    }
+
+    /**
+     * Reader pages define a few same-origin admin actions only as inline
+     * scripts. Expose them as ordinary forms when the matching visible control
+     * exists, so the normal fresh-form revalidation and confirmation gates
+     * apply. Never invent a control that the page does not render.
+     */
+    private fun readAdminForms(doc: Document, sourceUrl: String, sourceTid: String, pageSafe: String): List<SiteForm> {
+        if (!sourceTid.matches(numericId)) return emptyList()
+        val seen = mutableSetOf<String>()
+        val result = mutableListOf<SiteForm>()
+        doc.select("[onclick],a[href^=javascript:]").forEach { control ->
+            val script = control.attr("onclick").ifBlank { control.attr("href") }
+            val call = parseReadAdminCall(script) ?: return@forEach
+            if (call.tid != sourceTid || call.formId in seen) return@forEach
+            val endpoint = when (call.kind) {
+                "cztz" -> "diy_read_cztz.php"
+                "admove" -> "diy_admin_read.php"
+                "hide" -> "kf_fw_0ladmin.php"
+                else -> "diy_admin_tips.php"
+            }
+            val scripted = scriptSafeId(doc, endpoint)
+            val safe = when {
+                call.kind == "tip" -> ""
+                scripted.matches(safeToken) -> scripted
+                pageSafe.matches(safeToken) -> pageSafe
+                else -> ""
+            }
+            if (call.kind != "tip" && !safe.matches(safeToken)) return@forEach
+            val hidden = when (call.kind) {
+                "cztz" -> listOf(FormValue("tid", sourceTid), FormValue("pid", call.pid), FormValue("safeid", safe))
+                "admove" -> listOf(FormValue("tid", sourceTid), FormValue("safeid", safe))
+                "hide" -> listOf(FormValue("tid", sourceTid), FormValue("pid", call.pid), FormValue("safeid", safe))
+                else -> listOf(FormValue("addo", call.addo), FormValue("tid", sourceTid), FormValue("pid", call.pid))
+            }
+            val (title, label, warning) = when (call.kind) {
+                "cztz" -> Triple(
+                    if (call.pid == "tpc") "提交优秀（主题）" else "提交优秀（回帖 ${call.pid}）",
+                    "提交优秀",
+                    "该操作只会提交到站点允许的优秀区（管理区、求物区、自绘区、出处区）；每次都需要单独确认。",
+                )
+                "admove" -> Triple("移入无限制区", "确认移入", "站点会将该主题移入无限制区；确认后不可撤销。")
+                "hide" -> Triple("屏蔽回帖 ${call.pid}", "确认屏蔽", "屏蔽后除回帖人和管理人员外不可见，且不可恢复。")
+                else -> Triple("管理提示", "确认", "该操作会改变站点数据，参数取自当前页面；请核对后确认。")
+            }
+            result.add(SiteForm(call.formId, title, sourceUrl, "$origin/$endpoint", "POST", hidden,
+                emptyList(), listOf(SiteSubmit(label, null, "")), warning = warning))
+            seen.add(call.formId)
+        }
         return result
+    }
+
+    private fun parseReadAdminCall(value: String): ReadAdminCall? {
+        val code = value.removePrefix("javascript:").trim().trimEnd(';').trim()
+        if (code.length > 160) return null
+        cztzCall.matchEntire(code)?.let {
+            return ReadAdminCall("cztz", it.groupValues[1], pid = it.groupValues[2])
+        }
+        readMoveCall.matchEntire(code)?.let { return ReadAdminCall("admove", it.groupValues[1]) }
+        hideReplyCall.matchEntire(code)?.let {
+            return ReadAdminCall("hide", it.groupValues[1], pid = it.groupValues[2])
+        }
+        adminTipCall.matchEntire(code)?.let {
+            return ReadAdminCall("tip", it.groupValues[2], pid = it.groupValues[3], addo = it.groupValues[1])
+        }
+        return null
+    }
+
+    private fun scriptSafeId(doc: Document, endpoint: String): String {
+        val pattern = Regex("""(?s)\Q$endpoint\E.{0,1200}?safeid\s*[=:]\s*['"]?([0-9a-zA-Z]{4,64})""")
+        return doc.select("script").asSequence().mapNotNull { pattern.find(it.data())?.groupValues?.get(1) }.firstOrNull().orEmpty()
+    }
+
+    /**
+     * Some site templates write `<option value="2" />label</option>`; HTML
+     * parsers treat the self-closing slash on a non-void element as an empty
+     * option and leave the visible label as a sibling text node. Recover the
+     * label so select controls are not rendered as blank choices.
+     */
+    private fun optionLabel(option: Element): String {
+        option.text().trim().takeIf { it.isNotBlank() }?.let { return it }
+        return generateSequence(option.nextSibling()) { it.nextSibling() }
+            .takeWhile { it !is Element || it.tagName() != "option" }
+            .take(4)
+            .joinToString(" ") { if (it is TextNode) it.text() else (it as? Element)?.text().orEmpty() }
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun parseForm(form: Element, url: String, id: String, pageTitle: String): SiteForm? {
@@ -753,8 +1142,11 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
                 type == "checkbox" -> fields.add(SiteField("$id:$index", name, fieldLabel(e, name), SiteFieldKind.CHECKBOX,
                     if (e.hasAttr("checked")) listOf(value.ifEmpty { "on" }) else emptyList(), listOf(FormOption(value.ifEmpty { "on" }, fieldLabel(e, name)))))
                 e.tagName() == "select" -> {
-                    val options = e.select("option").filterNot { it.hasAttr("disabled") }.map { FormOption(if (it.hasAttr("value")) it.attr("value") else it.text(), it.text()) }
-                    val selected = e.select("option[selected]").map { if (it.hasAttr("value")) it.attr("value") else it.text() }
+                    val options = e.select("option").filterNot { it.hasAttr("disabled") }.map {
+                        val label = optionLabel(it)
+                        FormOption(if (it.hasAttr("value")) it.attr("value") else label, label)
+                    }
+                    val selected = e.select("option[selected]").map { if (it.hasAttr("value")) it.attr("value") else optionLabel(it) }
                     fields.add(SiteField("$id:$index", name, fieldLabel(e, name), SiteFieldKind.SELECT,
                         selected.ifEmpty { if (!e.hasAttr("multiple")) options.take(1).map { it.value } else emptyList() }, options,
                         e.hasAttr("required"), multiple = e.hasAttr("multiple")))
@@ -783,6 +1175,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val job = hidden.firstOrNull { it.name == "job" }?.value.orEmpty()
         val title = when {
             profileModify -> "修改资料"
+            fields.any { it.name == "psize" } && hidden.any { it.name == "ptid" } -> "帖子评分"
             purpose == "virement" -> "转账贡献"
             purpose == "draw" -> "取款（KFB）"
             purpose == "save" -> "存款（KFB）"
@@ -798,12 +1191,16 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         }
         return SiteForm(id, title, url, target, method, hidden, fields, submits.ifEmpty { listOf(SiteSubmit("提交", null, "")) },
             form.attr("enctype").equals("multipart/form-data", true),
-            if (target.contains("H_name=bank") || purpose in listOf("virement", "draw", "save")) "请核对收款人、金额与规则。" else "提交会修改站点数据。")
+            if (target.contains("H_name=bank") || purpose in listOf("virement", "draw", "save")) "请核对收款人、金额与规则。"
+            else if (fields.any { it.name == "psize" } && hidden.any { it.name == "ptid" }) "评分会进入站点审核；资源体积请以网盘实际显示为准。"
+            else "提交会修改站点数据。")
     }
 
     private fun fieldLabel(e: Element, name: String): String {
         e.id().takeIf { it.isNotBlank() }?.let { id -> e.ownerDocument()?.select("label")?.firstOrNull { it.attr("for") == id }?.text()?.takeIf { it.isNotBlank() }?.let { return it } }
         if (name == "delid[]") return e.closest("tr")?.selectFirst("a[href]")?.text()?.take(100).orEmpty().ifBlank { "选择项目" }
+        mapOf("psize" to "资源体积", "psizegb" to "体积单位", "pnew" to "首发/补档", "pgod" to "自购认定", "ptext" to "附言")[name]
+            ?.let { return it }
         val previous = e.closest("td")?.previousElementSibling()?.text()?.trim()?.take(80).orEmpty()
         if (previous.isNotBlank()) return previous.trimEnd('：', ':')
         return e.attr("title").ifBlank { e.attr("placeholder") }.take(80).ifBlank {

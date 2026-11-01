@@ -33,11 +33,13 @@ class NativeTaskParserTest {
         val tracking = listing.replace("action=read", "action=readscout").replace("<td>否</td>", "<td>选择</td><td>否</td><td></td>")
         val tracked = parser.parse(main(tracking), "$origin/message.php?action=scout").nativePage!!.messages.single()
         assertEquals("收件人", tracked.recipient); assertTrue(tracked.unread)
-        assertEquals(SiteEffect.CHANGE, SiteRoutePolicy(origin).classify(tracked.url).effect, "Unverified tracking detail must stay conservative")
+        assertEquals(SiteEffect.READ, SiteRoutePolicy(origin).classify(tracked.url).effect, "Tracking details use the read-only message template")
         val detail = """<table><tr><td>发件人</td><td>示例发件人</td></tr>
             <tr><td>标题</td><td>这是比消息正文长得多的标题，不应当用它替换正文。</td></tr><tr><td>时间</td><td>2026-01-01</td></tr>
             <tr><td>正文</td><td><b>短正文</b></td></tr>
             <tr><td>操作</td><td><a href='message.php?action=write&amp;remid=1'>回复</a><a href='message.php?action=del&amp;mid=1'>删除</a></td></tr></table>"""
+        val trackedDetail = parser.parse(main(detail), "$origin/message.php?action=readscout&mid=1").nativePage!!.message!!
+        assertEquals("示例发件人", trackedDetail.sender); assertTrue(trackedDetail.html.contains("<b>短正文</b>"))
         val message = parser.parse(main(detail), "$origin/message.php?action=read&mid=1").nativePage!!.message!!
         assertEquals("示例发件人", message.sender); assertTrue(message.html.contains("<b>短正文</b>"))
         assertFalse(message.html.contains("标题")); assertNotNull(message.reply)
@@ -76,5 +78,53 @@ class NativeTaskParserTest {
     @Test fun boardFiltersComeFromSameBoardReadLinksOnly() {
         val page = parser.parse(main("<a href='thread.php?fid=1&amp;type=2'>讨论</a><a href='thread.php?fid=2&amp;type=2'>其他版块</a><a href='thread.php?fid=1&amp;type=2&amp;del=1'>危险</a>"), "$origin/thread.php?fid=1")
         assertEquals(listOf("讨论"), page.boardFilters.map { it.title })
+    }
+
+    @Test fun mailboxExposesBatchDownloadClearAndRefreshSafeExport() {
+        val form = """<form action='message.php?action=del' method='post'>
+            <input type='hidden' name='towhere' value='receivebox'>
+            <table><tr><th>标题</th><th>发件人</th><th>收件人</th><th>时间</th><th>已读</th><th></th></tr>
+            <tr><td><a href='message.php?action=read&amp;mid=1'>示例</a></td><td>甲</td><td>乙</td><td>now</td><td>否</td><td><input type='checkbox' name='delid[]' value='1'></td></tr></table>
+            <input type='radio' name='action' value='del' checked>删除
+            <input type='radio' name='action' value='down'>下载
+            <input type='submit' value='执行'></form>
+            <script>var clear='message.php?action=clear&amp;ckcode=abc123';</script>"""
+        val page = parser.parse("<html><body>${main(form)}</body></html>", "$origin/message.php?action=receivebox").nativePage!!
+        val export = assertNotNull(page.messageExport)
+        assertTrue(export.requiresSelection)
+        assertEquals("receivebox", export.box)
+        assertNotNull(page.forms.firstOrNull { it.id == export.formId })
+        assertEquals(SiteEffect.CHANGE, page.messageClear?.effect)
+        assertTrue(page.messageClear!!.url.contains("action=clear"))
+        val scout = form.replace("<input type='checkbox' name='delid[]' value='1'>", "")
+            .replace("value='receivebox'", "value='scout'")
+        val scoutExport = assertNotNull(parser.parse(main(scout), "$origin/message.php?action=scout").nativePage!!.messageExport)
+        assertFalse(scoutExport.requiresSelection)
+        assertEquals("scout", scoutExport.box)
+    }
+
+    @Test fun homepageSkinChoicesStayOnTheSignedOriginAndMarkCurrentBackground() {
+        val body = """<html><head><style>body{background:url(ys/bg/3.jpg)}</style></head><body>
+            <div class='dcol' style='width:900px'>首页</div>
+            <a href='diy_index_bg.php?id=2&amp;safeid=synthetic' title='夜色'><img src='ys/bg/2.jpg'></a>
+            <a href='diy_index_bg.php?id=3&amp;safeid=synthetic'><img src='ys/bg/3.jpg'></a>
+            <a href='diy_index_bg.php?id=999&amp;safeid=synthetic' title='恢复默认'>默认</a>
+            <a href='https://evil.example/diy_index_bg.php?id=4&amp;safeid=synthetic'>跨站</a></body></html>"""
+        val skins = parser.parse(body, "$origin/index.php").homeSkins
+        assertEquals(listOf("2", "3", "999"), skins.map { it.id })
+        assertEquals("夜色", skins[0].title)
+        assertTrue(skins[1].selected)
+        assertFalse(skins[2].selected)
+        assertTrue(skins[2].title.contains("恢复默认"))
+    }
+
+    @Test fun rewardSubpagesAndRegistrationAreReadableNavigation() {
+        val routes = SiteRoutePolicy(origin)
+        listOf("kf_fw_ig_mybp.php", "kf_fw_ig_halo.php", "kf_fw_ig_pklist.php", "kf_fw_ig_shop.php")
+            .forEach { assertEquals(SiteEffect.READ, routes.classify(it).effect, it) }
+        assertEquals(SiteEffect.READ, routes.classify("kf_fw_ig_readme.php?safeid=abc123").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("kf_fw_ig_readme.php?safeid=abc123&del=1").effect)
+        assertEquals(SiteEffect.READ, routes.classify("register.php").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("register.php?action=submit").effect)
     }
 }

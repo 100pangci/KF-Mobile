@@ -44,6 +44,19 @@ object KfDestinations {
         if (url.substringBefore('?').substringBefore('#').substringAfterLast('/') != "search.php") return false
         val params = url.substringAfter('?', "").substringBefore('#').split('&').filter { it.isNotBlank() }
         val keys = params.map { it.substringBefore('=') }
+        // Profile pages expose direct GET result links for a user's topics
+        // (authorid) or replies (authorid + sch_area=2). These are result
+        // navigation, but only the numeric id and the observed area value are
+        // accepted; keyword search still goes through the POST path.
+        val authorId = params.firstOrNull { it.substringBefore('=') == "authorid" }?.substringAfter('=', "")
+        if (authorId != null) {
+            if (keys.distinct().size != keys.size || keys.any { it !in setOf("authorid", "sch_area", "page") } ||
+                !authorId.matches(Regex("[0-9]{1,20}"))) return false
+            val area = params.firstOrNull { it.substringBefore('=') == "sch_area" }?.substringAfter('=', "")
+            if (area != null && area !in setOf("0", "2")) return false
+            val page = params.firstOrNull { it.substringBefore('=') == "page" }?.substringAfter('=', "")
+            return page == null || page.matches(Regex("[0-9]{1,5}"))
+        }
         if (keys.any { it !in setOf("keyword", "pwuser", "searchid", "page", "step") }) return false
         if ("step" !in keys) return true
         // PHPWind can include step=2 on an already-issued search receipt. Do

@@ -28,12 +28,25 @@ class SiteRoutePolicy(private val origin: String) {
             path == "faq.php" && action in listOf("", "faq") && only("id", "hid", "action") -> SiteEffect.READ
             path == "show.php" && only("uid", "page", "fid", "tid") -> SiteEffect.READ
             path == "kf_no1.php" && only("no1", "page") -> SiteEffect.READ
-            path == "kf_share.php" && only("uid", "page", "fid", "tid") -> SiteEffect.READ
+            path == "kf_share.php" && only("uid", "page", "fid", "tid", "new", "ti") -> SiteEffect.READ
             path == "guanjianci.php" && only("gjc", "uid", "page") -> SiteEffect.READ
             path == "profile.php" && action in listOf("", "show", "modify", "favor") && only("action", "uid", "type", "page", "sf") -> SiteEffect.READ
+            // Tracking details use the same read-only message template as the
+            // inbox detail. Only a numeric mid is accepted; the list page is
+            // the sole source of these links and never attaches write tokens.
+            path == "message.php" && action == "readscout" &&
+                url.queryParameter("mid")?.matches(Regex("[0-9]{1,20}")) == true &&
+                only("action", "mid") -> SiteEffect.READ
             path == "message.php" && action in listOf("", "receivebox", "sendbox", "scout", "banned", "read", "write") && only("action", "mid", "page", "touid", "remid", "towhere") -> SiteEffect.READ
             path == "post.php" && action in listOf("", "new", "reply", "quote", "modify") && only("action", "fid", "tid", "pid", "article") -> SiteEffect.READ
             path == "search.php" && url.query.isNullOrBlank() -> SiteEffect.READ
+            // Profile pages link to a user's topics/replies with a direct GET
+            // result page. Only the numeric author id and the site's observed
+            // reply area value are accepted; keyword search still uses POST.
+            path == "search.php" && only("authorid", "sch_area", "page") &&
+                url.queryParameter("authorid")?.matches(Regex("[0-9]{1,20}")) == true &&
+                url.queryParameter("sch_area") in listOf(null, "", "0", "2") &&
+                url.queryParameter("page").let { it == null || it.matches(Regex("[0-9]{1,5}")) } -> SiteEffect.READ
             path == "register.php" && url.query.isNullOrBlank() -> SiteEffect.READ
             path == "login.php" && only() -> SiteEffect.READ
             path == "hack.php" && url.queryParameter("H_name") == "bank" && only("H_name") -> SiteEffect.READ
@@ -41,6 +54,12 @@ class SiteRoutePolicy(private val origin: String) {
                 url.queryParameter("action") == "log" && url.queryParameter("to") in listOf(null, "", "0", "1") &&
                 only("H_name", "action", "to", "page") -> SiteEffect.READ
             path in listOf("kf_growup.php", "kf_lv200.php", "kf_fw_1wkfb.php", "kf_fw_ig_index.php") && only("ping", "page", "uid") -> SiteEffect.READ
+            // Reward sub-pages are plain GET links from the READ-only reward
+            // dashboard. My items, halo, ranking and shop carry no action
+            // parameters; the help page is readable with its issued safeid.
+            path in listOf("kf_fw_ig_mybp.php", "kf_fw_ig_halo.php", "kf_fw_ig_pklist.php", "kf_fw_ig_shop.php") && only() -> SiteEffect.READ
+            path == "kf_fw_ig_readme.php" &&
+                url.queryParameter("safeid")?.matches(Regex("[0-9a-zA-Z]{1,32}")) == true && only("safeid") -> SiteEffect.READ
             path == "kf_fw_1wkfb.php" && url.queryParameter("do") == "2" &&
                 only("do", "safeid", "id", "ping", "page", "uid") -> SiteEffect.READ
             path == "fyg_sjcdwj.php" && (only() || (url.queryParameter("go") == "play" && url.queryParameter("xl") in listOf("1", "2") && only("go", "xl"))) -> SiteEffect.READ

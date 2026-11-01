@@ -139,9 +139,11 @@ data class RewardAction(
     val fields: List<FormValue>,
     val sourceUrl: String,
     val readbackUrl: String = sourceUrl,
+    val kind: String = if (protocol == RewardProtocol.AJAX_POST) "battle-step" else "reward",
+    val confirmation: String = "",
 ) {
     // Endpoint query values include one-use verification material.
-    override fun toString() = "RewardAction(protocol=$protocol, method=$method, fields=${fields.size})"
+    override fun toString() = "RewardAction(kind=$kind, protocol=$protocol, method=$method, fields=${fields.size})"
 }
 
 enum class RewardProtocol { GET_LINK, AJAX_POST }
@@ -161,7 +163,7 @@ data class AvatarUploadRequest(
     val height: Int,
 )
 
-// ---- Gugu game read-only model -------------------------------------------
+// ---- Gugu game model ------------------------------------------------------
 
 data class GuguCharacter(
     val name: String,
@@ -170,6 +172,7 @@ data class GuguCharacter(
     val shells: String = "",
     val monthlyWins: String = "",
     val monthlyNpc: String = "",
+    val monthlyNpcLevel: String = "",
     val monthlyPvp: String = "",
 ) {
     override fun toString() = "GuguCharacter(hasName=${name.isNotBlank()}, level=$level)"
@@ -183,9 +186,120 @@ data class GuguItem(
     val iconUrl: String = "",
     val stats: List<String> = emptyList(),
     val equipped: Boolean = false,
-)
+    val actions: List<GuguAction> = emptyList(),
+) {
+    override fun toString() = "GuguItem(hasId=${id.isNotBlank()}, leveled=${level.isNotBlank()}, actions=${actions.size})"
+}
 
 data class GuguCooldown(val label: String, val remaining: String, val description: String = "")
+
+/** One row of the site's card win-rate matrix: attacking and defending cells. */
+data class GuguWinRateRow(
+    val card: String,
+    val attack: List<String> = emptyList(),
+    val defense: List<String> = emptyList(),
+)
+
+data class GuguWinRateTable(
+    val rank: String = "",
+    val cards: List<String> = emptyList(),
+    val rows: List<GuguWinRateRow> = emptyList(),
+    val note: String = "",
+)
+
+data class GuguShopItem(
+    val name: String,
+    val price: String,
+    val dailyLimit: Boolean = false,
+    val action: GuguAction? = null,
+)
+
+/** A numeric or text field rendered by a game action form. */
+data class GuguActionField(
+    val name: String,
+    val label: String,
+    val hint: String = "",
+    val defaultValue: String = "",
+    val numeric: Boolean = true,
+    val maxLength: Int = 64,
+) {
+    override fun toString() = "GuguActionField(numeric=$numeric)"
+}
+
+/** A captured game operation. The numeric target is resolved by the game protocol. */
+data class GuguAction(
+    val id: String,
+    val kind: GuguActionKind,
+    val label: String,
+    val confirmation: String,
+    val detail: String = "",
+    val destructive: Boolean = false,
+    val inputLabel: String = "",
+    val inputHint: String = "",
+    val inputDefault: String = "",
+    /** Multi-field actions such as attribute allocation and halo talents. */
+    val fields: List<GuguActionField> = emptyList(),
+) {
+    override fun toString() = "GuguAction(kind=$kind, label=$label)"
+}
+
+enum class GuguActionKind {
+    EQUIP_ITEM,
+    UNEQUIP_ITEM,
+    DELETE_ITEM,
+    PIERCE_ITEM,
+    CARD_EQUIP,
+    BEACH_CLEAR,
+    BEACH_REFRESH,
+    SHOP_BUY,
+    PK_STEP,
+    PK_REFRESH,
+    PK_GO,
+    KEY_GENERATE,
+    KEY_EXTEND,
+    KEY_SHOP_ALLOW,
+    KEY_SHOP_DENY,
+    /** Opens a menu served by the game; opening itself is not a mutation. */
+    MENU_OPEN,
+    /** Executes one exact `oclick` option returned by a menu. */
+    MENU_CHOICE,
+    /** Executes one exact `oclickth` option carrying an extra id. */
+    MENU_CHOICE_EXTRA,
+    /** Opens one gift entry returned by the game's gift list. */
+    GIFT_OPEN,
+    /** Six-field attribute point allocation. */
+    STAT_ALLOCATE,
+    /** Halo talent save; the array is a comma-separated list of talent ids. */
+    HALO_SAVE,
+    /** Card max-level use; the game's `cmaxup` wire uses `num`, not `id`. */
+    MAX_UP,
+    /** Character rename; exposed only when the site enables its own input. */
+    RENAME,
+    /** One dice battle request; the site's own control may loop, this client does not. */
+    DICE_BATTLE,
+}
+
+data class GuguActionRequest(
+    val action: GuguAction,
+    val input: String = "",
+    val values: Map<String, String> = emptyMap(),
+) {
+    override fun toString() = "GuguActionRequest(kind=${action.kind}, input=${input.isNotBlank()}, fields=${values.size})"
+}
+
+/** A short-lived list of exact choices returned by fyg_menu.php. */
+data class GuguMenu(val title: String, val actions: List<GuguAction>) {
+    override fun toString() = "GuguMenu(actions=${actions.size})"
+}
+
+sealed class GuguActionResult {
+    data class Success(val message: String, val snapshot: GuguSnapshot? = null) : GuguActionResult()
+    data class Rejected(val message: String) : GuguActionResult()
+    data class Uncertain(val message: String, val snapshot: GuguSnapshot? = null) : GuguActionResult()
+    data class Choices(val menu: GuguMenu, val snapshot: GuguSnapshot? = null) : GuguActionResult()
+}
+
+data class GuguLogEntry(val date: String, val lines: List<String> = emptyList())
 
 data class GuguSnapshot(
     val character: GuguCharacter,
@@ -195,7 +309,12 @@ data class GuguSnapshot(
     val cards: List<GuguItem> = emptyList(),
     val cooldowns: List<GuguCooldown> = emptyList(),
     val links: List<SiteDestination> = emptyList(),
-    val readOnlyNote: String = "咕咕镇当前只读：战斗、使用道具、商店购买等操作尚未接入。",
+    val winRates: GuguWinRateTable? = null,
+    val shop: List<GuguShopItem> = emptyList(),
+    val updateLog: List<GuguLogEntry> = emptyList(),
+    /** Page-level actions such as beach cleanup, PK refresh and key settings. */
+    val actions: List<GuguAction> = emptyList(),
+    val readOnlyNote: String = "咕咕镇操作需要用户确认；客户端不会自动连续战斗、购买或重试。",
     val unparsed: List<String> = emptyList(),
 )
 

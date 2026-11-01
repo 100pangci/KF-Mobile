@@ -51,6 +51,14 @@ enum class CatalogSource(val label: String) { ONLINE("在线配置"), CACHE("本
 data class CatalogResult(val catalog: DomainCatalog, val source: CatalogSource, val warning: String? = null)
 
 data class SiteLink(val title: String, val url: String, val subtitle: String = "", val group: String = "")
+/** A homepage background option offered by diy_index_bg.php. */
+data class HomeSkin(
+    val id: String,
+    val title: String,
+    val thumbnailUrl: String,
+    val url: String,
+    val selected: Boolean = false,
+)
 data class HomeFeedSection(val id: String, val title: String, val topics: List<SiteLink>)
 data class PostMeta(val title: String, val html: String)
 data class PostReply(val title: String, val html: String, val targetUrl: String? = null)
@@ -113,6 +121,10 @@ data class PageData(
     val favorite: SiteDestination? = null,
     val dailyBonus: SiteDestination? = null,
     val boardFilters: List<SiteLink> = emptyList(),
+    /** Top-level site tools that are not boards, such as 最新共享. */
+    val siteLinks: List<SiteLink> = emptyList(),
+    /** Homepage background choices, only parsed from the signed home page. */
+    val homeSkins: List<HomeSkin> = emptyList(),
 )
 
 enum class AuthStatus { AUTHENTICATED, LOGIN_REQUIRED, UNKNOWN }
@@ -189,9 +201,13 @@ interface ForumService {
         if (files.isEmpty()) submit(form, values) else SubmitResult.Rejected("当前服务未接入附件上传")
     suspend fun executeReward(action: RewardAction): RewardExecutionResult =
         RewardExecutionResult.Rejected("当前服务未接入奖励协议")
+    suspend fun exportMessages(request: MessageExportRequest): MessageExportResult =
+        MessageExportResult.Rejected("当前服务未接入消息导出")
     suspend fun uploadAvatar(request: AvatarUploadRequest): AvatarUploadResult =
         AvatarUploadResult.Rejected("当前服务未接入头像上传")
     suspend fun gugu(): GuguSnapshot? = null
+    suspend fun guguAction(request: GuguActionRequest): GuguActionResult =
+        GuguActionResult.Rejected("当前服务未接入咕咕镇操作")
     fun encodedLength(value: String): Int
     fun clearSession()
     fun close()

@@ -95,6 +95,17 @@ class DemoService(override val origin: String) : ForumService {
         delay(delayMillis)
         return executeResult
     }
+    var guguSnapshot: GuguSnapshot? = null
+    var guguActionCalls = 0
+    val guguActionRequests = mutableListOf<GuguActionRequest>()
+    var guguActionResult: GuguActionResult = GuguActionResult.Success("已执行")
+    override suspend fun gugu() = guguSnapshot
+    override suspend fun guguAction(request: GuguActionRequest): GuguActionResult {
+        guguActionCalls++
+        guguActionRequests += request
+        delay(delayMillis)
+        return guguActionResult
+    }
     override fun encodedLength(value: String) = gbkBytes(value).size
     override fun destination(url: String, title: String) = SiteRoutePolicy(origin).classify(url, title)
     override fun clearSession() { cleared = true }
@@ -507,6 +518,114 @@ class AppControllerTest {
         c.openEditor("post.php?fid=1"); runCurrent(); c.draftContent = "保留草稿"
         c.showEmoticonPicker = true; c.requestBack()
         assertFalse(c.showEmoticonPicker); assertNotNull(c.editor); assertEquals("保留草稿", c.draftContent)
+        c.close()
+    }
+    @Test fun guguActionWaitsForConfirmationAndAppliesReturnedSnapshot() = runTest {
+        val factory = DemoFactory()
+        val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        val service = factory.services.getValue(c.origin)
+        val action = GuguAction("pk:7", GuguActionKind.PK_STEP, "挑战", "确认挑战？")
+        service.guguSnapshot = GuguSnapshot(GuguCharacter("测试角色"), actions = listOf(action))
+        c.loadGugu(force = true); runCurrent()
+        assertEquals("测试角色", c.gugu?.character?.name)
+        c.requestGuguAction(action)
+        assertEquals(0, service.guguActionCalls, "Showing the confirmation dialog must not send a mutation")
+        assertEquals(action, c.pendingGuguAction)
+        service.guguActionResult = GuguActionResult.Success("挑战完成",
+            service.guguSnapshot!!.copy(character = GuguCharacter("测试角色", level = "2")))
+        c.confirmGuguAction(); runCurrent()
+        assertEquals(1, service.guguActionCalls)
+        assertEquals(action, service.guguActionRequests.single().action)
+        assertEquals("挑战完成", c.toast)
+        assertEquals("2", c.gugu?.character?.level)
+        assertNull(c.pendingGuguAction)
+        assertFalse(c.guguActionBusy)
+        c.close()
+    }
+    @Test fun guguMenuChoiceNeedsItsOwnConfirmationAndRunsOnce() = runTest {
+        val factory = DemoFactory()
+        val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        val service = factory.services.getValue(c.origin)
+        val open = GuguAction("menu:4:3001", GuguActionKind.MENU_OPEN, "打开菜单", "确认打开？")
+        val choice = GuguAction("choice:30:9001", GuguActionKind.MENU_CHOICE, "使用", "确认使用？", destructive = true)
+        val other = GuguAction("choice:30:9999", GuguActionKind.MENU_CHOICE, "其他", "确认其他？", destructive = true)
+        service.guguSnapshot = GuguSnapshot(GuguCharacter("测试角色"), actions = listOf(open))
+        c.loadGugu(force = true); runCurrent()
+        c.requestGuguAction(open)
+        service.guguActionResult = GuguActionResult.Choices(GuguMenu("操作菜单", listOf(choice)))
+        c.confirmGuguAction(); runCurrent()
+        assertEquals(1, service.guguActionCalls)
+        assertNull(c.pendingGuguAction)
+        assertNotNull(c.guguMenu)
+        c.chooseGuguMenu(other)
+        assertEquals(1, service.guguActionCalls, "A stale menu option must not be submitted")
+        assertNull(c.guguMenu)
+        assertNotNull(c.guguError)
+        c.requestGuguAction(open)
+        service.guguActionResult = GuguActionResult.Choices(GuguMenu("操作菜单", listOf(choice)))
+        c.confirmGuguAction(); runCurrent()
+        c.chooseGuguMenu(choice)
+        assertNull(c.guguMenu)
+        assertEquals(choice, c.pendingGuguAction)
+        assertEquals(2, service.guguActionCalls, "Choosing a menu item only opens its confirmation")
+        service.guguActionResult = GuguActionResult.Success("已使用")
+        c.confirmGuguAction(); runCurrent()
+        assertEquals(3, service.guguActionCalls)
+        assertEquals(choice, service.guguActionRequests.last().action)
+        c.close()
+    }
+    @Test fun guguMultiFieldActionSendsEveryFieldAfterValidation() = runTest {
+        val factory = DemoFactory()
+        val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        val service = factory.services.getValue(c.origin)
+        val fields = (1..6).map { GuguActionField("add0$it", "属性 $it", defaultValue = "$it") }
+        val action = GuguAction("stat:77", GuguActionKind.STAT_ALLOCATE, "分配属性", "确认分配？", fields = fields)
+        service.guguSnapshot = GuguSnapshot(GuguCharacter("测试角色"), actions = listOf(action))
+        c.loadGugu(force = true); runCurrent()
+        c.requestGuguAction(action)
+        assertEquals("2", c.guguActionValue("add02"), "Fields must start from the parsed defaults")
+        c.updateGuguActionValue("add02", "x")
+        c.confirmGuguAction()
+        assertEquals(0, service.guguActionCalls, "A non-numeric field must not be submitted")
+        assertNotNull(c.guguError)
+        assertNotNull(c.pendingGuguAction)
+        c.updateGuguActionValue("add02", "9")
+        service.guguActionResult = GuguActionResult.Success("已分配")
+        c.confirmGuguAction(); runCurrent()
+        assertEquals(1, service.guguActionCalls)
+        val request = service.guguActionRequests.single()
+        assertEquals(action, request.action)
+        assertEquals(mapOf("add01" to "1", "add02" to "9", "add03" to "3",
+            "add04" to "4", "add05" to "5", "add06" to "6"), request.values)
+        assertEquals("", request.input)
+        assertTrue(c.guguActionValues.isEmpty())
+        c.close()
+    }
+    @Test fun guguActionInputIsValidatedAndRejectionDoesNotRetry() = runTest {
+        val factory = DemoFactory()
+        val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        val service = factory.services.getValue(c.origin)
+        val action = GuguAction("pierce:12", GuguActionKind.PIERCE_ITEM, "熔炼", "确认熔炼？", inputLabel = "数量")
+        service.guguSnapshot = GuguSnapshot(GuguCharacter("测试角色"), actions = listOf(action))
+        c.loadGugu(force = true); runCurrent()
+        c.requestGuguAction(action)
+        c.updateGuguActionInput("abc")
+        c.confirmGuguAction()
+        assertEquals(0, service.guguActionCalls)
+        assertNotNull(c.guguError)
+        assertNotNull(c.pendingGuguAction)
+        c.updateGuguActionInput("12")
+        service.guguActionResult = GuguActionResult.Rejected("材料不足")
+        c.confirmGuguAction(); runCurrent()
+        assertEquals(1, service.guguActionCalls)
+        assertEquals("12", service.guguActionRequests.single().input)
+        assertEquals("材料不足", c.guguError)
+        assertNull(c.pendingGuguAction, "A rejected action must close the dialog rather than loop")
+        assertFalse(c.guguActionBusy)
         c.close()
     }
 }

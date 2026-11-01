@@ -63,6 +63,15 @@ class NativeSiteTest {
         assertFalse(claimed.claimed)
         assertEquals(StatusKind.UNKNOWN, claimed.claimStatus)
         assertNull(claimed.claimUrl)
+        // Actual site copy once today's reward has been collected. There is no
+        // anchor in this state; the plain status line is the completion marker.
+        val done = parser.parse(
+            html("javascript:;", "今天的每日奖励已经领过了，请明天继续。"),
+            "$origin/kf_growup.php",
+        ).nativePage!!.growth!!
+        assertTrue(done.claimed)
+        assertEquals(StatusKind.COMPLETED, done.claimStatus)
+        assertNull(done.claimUrl)
         val open = parser.parse(html("kf_growup.php?ok=1&amp;safeid=x", "STATUS"), "$origin/kf_growup.php").nativePage!!.growth!!
         assertFalse(open.claimed)
         assertEquals(StatusKind.AVAILABLE, open.claimStatus)
@@ -71,6 +80,84 @@ class NativeSiteTest {
         assertEquals("3", open.coefficient)
         assertEquals("20", open.experience)
         assertEquals(40, open.progress)
+    }
+
+    @Test fun progressPenaltiesUseTheDedicatedDeductionBlockOnly() {
+        val html = """<div class="dcol" style="width:900px">
+            <div class="k_ale k_tr"><span class="k_butt k_blk"><span class="k_f32">当前进度分：<span class="k_f32">150</span></span><br>
+            未达 90分 权限-只能停留在首页<br>规则示例：已完成、未领取</span></div>
+            <div class="k_ale k_tr"><span class="k_butt k_blk"><br>
+            <span class="k_f18">我的扣分记录（异议请至<a href="thread.php?fid=4">管理区</a>发帖）</span><br><hr>
+            <span class="k_f14" style="color:#ff3333;">[4年前][扣40进度分][回帖]<a href="read.php?tid=954069&amp;sf=aa7#16457896">《示例主题》</a></span><br>扣分原因：广告等_第1条（）<br><hr>
+            <span class="k_f14" style="color:#ff3333;">[2年前][扣10进度分][主题]<a href="read.php?tid=2">《另一个主题》</a></span><br>扣分原因：重复发帖<br><hr>
+            </span></div>
+            <p>规则正文里的 已完成 与 未领取 不应成为状态</p></div>"""
+        val progress = parser.parse(html, "$origin/kf_lv200.php").nativePage!!.progress!!
+        assertEquals("150", progress.stats.single().value)
+        assertEquals(2, progress.penalties.size)
+        val first = progress.penalties[0]
+        assertEquals("4年前", first.time)
+        assertEquals("扣40进度分", first.points)
+        assertEquals("回帖", first.action)
+        assertEquals("《示例主题》", first.title)
+        assertEquals("广告等_第1条（）", first.reason)
+        assertTrue(first.url.contains("read.php?tid=954069"))
+        assertEquals("重复发帖", progress.penalties[1].reason)
+        assertEquals("《另一个主题》", progress.penalties[1].title)
+    }
+
+    @Test fun progressPageWithoutDeductionBlockKeepsScoreOnly() {
+        val html = """<div class="dcol" style="width:900px">
+            <div class="k_ale k_tr"><span>当前进度分：<span class="k_f32">120</span><br>达到 120分 权限-可发表帖子</span></div></div>"""
+        val progress = parser.parse(html, "$origin/kf_lv200.php").nativePage!!.progress!!
+        assertEquals("120", progress.stats.single().value)
+        assertTrue(progress.penalties.isEmpty())
+    }
+
+    @Test fun normalMentionResultTableKeepsTimeTypeTitleAndAuthorLinks() {
+        val html = """<div class="dcol" style="width:900px">
+            <table class="kf_share1"><tr><td colspan="7">含有关键词 “示例” 的内容</td></tr></table>
+            <table class="kf_share1">
+            <tr><td width="80" class="kf_share2"><span style="color:#FF0000;">时间</span></td>
+            <td width="100" class="kf_share2"><span style="color:#FF0000;">类型</span></td>
+            <td width="500"><span style="color:#FF0000;">&nbsp;标题</span></td>
+            <td width="100" class="kf_share2"><span style="color:#FF0000;">发表人</span></td></tr>
+            <tr><td>2026-11-01 09:00</td><td>回复</td>
+            <td><a href="read.php?tid=123&amp;pid=456">《示例主题》</a></td>
+            <td><a href="profile.php?uid=789">示例用户</a></td></tr>
+            </table></div>"""
+        val page = parser.parse(html, "$origin/guanjianci.php?gjc=示例").nativePage!!
+        val table = page.tables.first { it.header }
+        assertEquals(listOf("时间", "类型", "标题", "发表人"), table.rows.first().map { it.text })
+        val record = table.rows[1]
+        assertEquals("2026-11-01 09:00", record[0].text)
+        assertEquals("回复", record[1].text)
+        assertEquals("《示例主题》", record[2].text)
+        assertTrue(record[2].link.orEmpty().contains("read.php?tid=123"))
+        assertEquals("示例用户", record[3].text)
+        assertTrue(record[3].link.orEmpty().contains("profile.php?uid=789"))
+    }
+
+    @Test fun genericPageKeepsReadOnlyDisplayValuesButNotEditableFields() {
+        val html = """<div class="dcol" style="width:900px">
+            <table class="kf_fw_ig3"><tr>
+            <td><input size="26" value="1317攻击力" type="text" readonly></td>
+            <td><input size="26" value="0/6100生命值" type="text" readonly></td>
+            <td><input type="text" name="keyword" placeholder="搜索"></td>
+            </tr></table>
+            <div class="line">战斗说明</div></div>"""
+        val native = parser.parse(html, "$origin/kf_fw_ig_index.php").nativePage!!
+        val text = buildString {
+            native.blocks.forEach { block -> when (block) {
+                is NativeBlock.Section -> append(block.text.ifBlank { block.html }).append(' ')
+                is NativeBlock.Table -> block.table.rows.flatten().forEach { append(it.text).append(' ') }
+                is NativeBlock.Links -> Unit
+            } }
+            native.links.forEach { append(it.title).append(' ') }
+        }
+        assertTrue(text.contains("1317攻击力"), "readonly value must survive generic cleanup")
+        assertTrue(text.contains("0/6100生命值"), "readonly value must survive generic cleanup")
+        assertFalse(text.contains("keyword"), "editable inputs must not leak as content")
     }
 
     @Test fun readerExposesSiteFavoriteAction() {
@@ -84,11 +171,14 @@ class NativeSiteTest {
     }
 
     @Test fun profileIsNativeStructuredData() {
-        val html = """<div class="dcol" style="width:900px"><table class="log1"><tr><td>示例会员 详细信息</td></tr><tr><td><img class="pic" src="avatars/demo.png"></td><td>用户名称：示例会员<br>会员等级：初回限定版<br>论坛货币：100 KFB</td></tr></table></div>"""
+        val html = """<div class="dcol" style="width:900px"><table class="log1"><tr><td>示例会员 详细信息</td></tr><tr><td><img class="pic" src="avatars/demo.png"></td><td>用户名称：示例会员<br>会员等级：初回限定版<br>论坛货币：100 KFB</td></tr>
+            <tr><td>[<a href="search.php?authorid=1">用户主题</a>] [<a href="search.php?authorid=1&amp;sch_area=2">用户回复</a>]</td></tr></table></div>"""
         val native = parser.parse(html, "$origin/profile.php?action=show&uid=1").nativePage!!
         assertEquals("示例会员", native.profile?.name)
         assertTrue(native.profile!!.info.any { it.label == "会员等级" })
         assertTrue(native.profile.avatar.startsWith(origin))
+        assertEquals(SiteEffect.READ, native.profile.links.single { it.title == "用户主题" }.effect)
+        assertEquals(SiteEffect.READ, native.profile.links.single { it.title == "用户回复" }.effect)
     }
 
     @Test fun profileHeaderAndStatsComeFromTheCentreCellOrder() {
@@ -105,6 +195,58 @@ class NativeSiteTest {
         assertEquals("示例会员", profile.name)
         assertEquals("初回限定版", profile.headline?.value)
         assertEquals(listOf("12 帖", "3456 KFB", "7.8"), profile.stats.map { it.value })
+    }
+    @Test fun readerAuthorDetailPageUsesTheNativeProfileLayout() {
+        val html = """<div class="dcol" style="width:900px"><table class="log1" cellspacing="0"><tr><td>示例会员 详细信息</td><td></td><td></td></tr>
+            <tr><td><img class="pic" src="1793519200/upload/95/1.jpg" width="140" height="200"></td>
+            <td>用户名称：示例会员<br>数字序列：1<br>会员等级：初回限定版<br>发帖数量：5 帖<br>论坛货币：100 KFB<br>注册时间：2024-01-01<br>在线时间：2 小时</td>
+            <td valign="top">个性签名：示例签名</td></tr>
+            <tr><td>[<a href="message.php?action=write&amp;touid=1">发送短信</a>] [<a href="search.php?authorid=1">用户主题</a>]<br>
+            [<a href="show.php?uid=1">所传附件</a>] [<a href="search.php?authorid=1&amp;sch_area=2" id="sch_post">用户回复</a>]</td></tr></table></div>"""
+        val native = parser.parse(html, "$origin/show.php?uid=1").nativePage!!
+        val profile = native.profile!!
+        assertEquals("示例会员", profile.name)
+        assertTrue(profile.avatar.startsWith(origin))
+        assertTrue(profile.info.any { it.label == "论坛货币" && it.value == "100 KFB" })
+        assertEquals(setOf("发送短信", "用户主题", "用户回复"), profile.links.map { it.title }.toSet())
+        assertFalse(profile.links.any { it.url == "$origin/show.php?uid=1" }, "the self link must not repeat the current page")
+        assertTrue(native.unsupported.isEmpty())
+        assertTrue(native.blocks.none { it is NativeBlock.Section && it.html.contains("用户名称：示例会员") },
+            "the detail table must not also be dumped as a raw section")
+    }
+
+    @Test fun homeQuickEntriesRemainInNativeLinksButTopicsDoNot() {
+        val html = """<div class="dcol" style="width:900px">
+            <a href="kf_growup.php">7174801KFB | 181.9贡献</a>
+            <a href="kf_fw_1wkfb.php">自助评分</a>
+            <a href="kf_fw_ig_index.php">争夺奖励</a>
+            <a href="kf_lv200.php">进度分：150</a>
+            <a href="read.php?tid=1">主题</a>
+        </div>"""
+        val page = parser.parse(html, "$origin/index.php")
+        val paths = page.nativePage!!.links.map { it.url.substringBefore('?').substringAfterLast('/') }.toSet()
+        assertTrue(paths.containsAll(listOf("kf_growup.php", "kf_fw_1wkfb.php", "kf_fw_ig_index.php", "kf_lv200.php")))
+        assertFalse("read.php" in paths)
+    }
+    @Test fun topNavigationToolsStayReachableWithoutDuplicatingBoards() {
+        val html = """<ul>
+            <li class="topmenuo3"><a href="index.php">绯月首页</a></li>
+            <li class="topmenuo3"><a href="javascript:;">Gal讨论</a><ul class="topmenuo2"><li><a href="thread.php?fid=102">Galgame推荐</a></li></ul></li>
+            <li class="topmenuo3"><a href="kf_share.php">最新共享</a></li>
+            <li class="topmenuo3"><a href="javascript:;">游戏介绍</a><ul class="topmenuo2"><li><a href="https://fan2d.top/subjects" target="_blank">游戏介绍</a></li></ul></li>
+        </ul>
+        <table width="1200"><tr>
+            <td><a href="fyg_sjcdwj.php?go=play&amp;xl=2">咕咕镇</a></td>
+            <td><a href="fyg_sjcdwj.php?go=play&amp;xl=1">咕咕线2</a></td>
+            <td><a href="https://galge.fun/" target="_blank">2DFan</a></td>
+        </tr></table>"""
+        val page = parser.parse(html, "$origin/index.php")
+        assertEquals(listOf("最新共享", "游戏介绍", "咕咕镇", "2DFan"), page.siteLinks.map { it.title })
+        assertEquals("$origin/kf_share.php", page.siteLinks.first().url)
+        assertEquals("$origin/fyg_sjcdwj.php?go=play&xl=2", page.siteLinks[2].url)
+        assertEquals("https://fan2d.top/subjects", page.siteLinks[1].url)
+        assertEquals(SiteEffect.READ, SiteRoutePolicy(origin).classify(page.siteLinks.first().url).effect)
+        assertEquals(SiteEffect.EXTERNAL, SiteRoutePolicy(origin).classify(page.siteLinks[1].url).effect)
     }
     @Test fun checkboxArrayAndRadioInputsPreserveBrowserSemantics() {
         val html = """<div class="dcol" style="width:900px"><form action="message.php" method="post"><input type="hidden" name="towhere" value="receivebox">
@@ -136,10 +278,64 @@ class NativeSiteTest {
         assertTrue("出战" in native.unsupported)
         assertEquals(SiteEffect.READ, native.links.first { it.title == "下一步" }.effect)
     }
+    @Test fun readerScriptHelpersForVisibleActionsAreNotReportedAsUnsupported() {
+        val html = """<a href="post.php?action=reply&fid=1&tid=2">回复帖子</a>
+            <a href="javascript:;" onclick="postreply('回 0楼(demo) 的帖子','demo');">回复</a>
+            <a href="javascript:;" onclick="cztz(floor0)">菜单</a>
+            <a href="javascript:;" onclick="cztzyx('2','3')">提交优秀</a>
+            <a href="javascript:;" onclick="startUnknownGame(1)">出战</a>"""
+        val native = parser.parse(html, "$origin/read.php?tid=2").nativePage!!
+        assertFalse(native.unsupported.any { it == "回复" || it == "菜单" })
+        assertTrue("提交优秀" in native.unsupported)
+        assertTrue("出战" in native.unsupported)
+    }
+    @Test fun nativeOwnedLocalAndEditorControlsAreNotReportedAsUnsupported() {
+        val message = parser.parse(
+            """<div class="dcol" style="width:900px"><a href="javascript:;" onclick="return checkset();">清空</a></div>""",
+            "$origin/message.php",
+        ).nativePage!!
+        assertTrue(message.unsupported.isEmpty(), "native selection already offers a clear action")
+
+        val reader = parser.parse(
+            """<div class="dcol" style="width:900px">
+                <a href="post.php?action=reply&fid=1&tid=2">回复帖子</a>
+                <a href="javascript:;" onclick="insertSmilie('[高兴]');">[高兴]</a>
+                <a href="javascript:;" onclick="postreply('回 0楼(demo) 的帖子','demo');">回复</a>
+            </div>""",
+            "$origin/read.php?tid=2",
+        ).nativePage!!
+        assertTrue(reader.unsupported.isEmpty(), "the native editor owns the reply emoticon catalog")
+
+        val editor = parser.parse(
+            """<div class="dcol" style="width:900px"><a href="javascript:;" onclick="showDefault();">[更多]</a></div>""",
+            "$origin/post.php?fid=52",
+        ).nativePage!!
+        assertTrue(editor.unsupported.isEmpty(), "the native editor already exposes the full emoticon catalog")
+    }
+    @Test fun chineseQueryValuesAreReencodedForTheGbkSite() {
+        val mentions = parser.resolve("guanjianci.php?gjc=示例", "$origin/index.php")!!
+        assertTrue(mentions.contains("gjc=%CA%BE%C0%FD"), mentions)
+        assertEquals("$origin/read.php?tid=1", parser.resolve("read.php?tid=1", "$origin/index.php"))
+        assertEquals("$origin/guanjianci.php?gjc=%CA%BE%C0%FD",
+            parser.resolve("guanjianci.php?gjc=%CA%BE%C0%FD", "$origin/index.php"))
+        val mixed = parser.resolve("read.php?tid=1&keyword=中文", "$origin/index.php")!!
+        assertTrue(mixed.contains("tid=1"), mixed)
+        assertTrue(mixed.contains("keyword=%D6%D0%CE%C4"), mixed)
+    }
+
     @Test fun routePolicyDoesNotTreatMutationsAsReadOnlyNavigation() {
         val routes = SiteRoutePolicy(origin)
         assertEquals(SiteEffect.READ, routes.classify("profile.php?action=modify").effect)
         assertEquals(SiteEffect.READ, routes.classify("message.php?action=read&mid=1").effect)
+        assertEquals(SiteEffect.READ, routes.classify("kf_share.php?new=1").effect)
+        assertEquals(SiteEffect.READ, routes.classify("kf_share.php?ti=16&new=1").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("kf_share.php?new=1&del=1").effect)
+        assertEquals(SiteEffect.READ, routes.classify("search.php?authorid=688495").effect)
+        assertEquals(SiteEffect.READ, routes.classify("search.php?authorid=688495&sch_area=2").effect)
+        assertEquals(SiteEffect.READ, routes.classify("search.php?authorid=688495&sch_area=2&page=2").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("search.php?authorid=abc").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("search.php?authorid=1&keyword=x").effect)
+        assertEquals(SiteEffect.CHANGE, routes.classify("search.php?authorid=1&sch_area=1").effect)
         assertEquals(SiteEffect.CHANGE, routes.classify("message.php?action=del&mid=1").effect)
         assertEquals(SiteEffect.CHANGE, routes.classify("diy_index_bg.php?id=999&safeid=synthetic").effect)
         assertEquals(SiteEffect.DOWNLOAD, routes.classify("job.php?action=download&aid=1").effect)
@@ -333,10 +529,69 @@ class NativeSiteTest {
             <tr><td></td><td><input type="submit" value="确认修改"></td></tr></table></form></div>"""
         val page = parser.parse(html, "$origin/profile.php?action=modify").nativePage!!
         assertTrue(page.tables.isEmpty())
+        assertTrue(page.unsupported.none { it.contains("头像上传") }, "dedicated avatar uploader must not be advertised as unsupported")
         val form = page.forms.single()
         assertEquals("修改资料", form.title)
         assertEquals(listOf("oldpwd", "propwd", "prohonor"), form.fields.map { it.name })
     }
+    @Test fun readPageTurnsAdminScriptControlsIntoConfirmedNativeForms() {
+        val html = """<div class="dcol" style="width:900px">
+            <input type="hidden" id="safeid" value="safe9876">
+            <input type="hidden" id="tui_tid" value="1086358">
+            <div id="read_tui"></div>
+            <div style="display:none" id="floor1">
+            <a href="javascript:;" id="cztztpc" onclick="cztzyx('1086358','tpc')">提交优秀</a>
+            <a href="javascript:;" id="cztz17964438" onclick="cztzyx('1086358','17964438')">提交优秀</a>
+            </div>
+            <a href="javascript:;" onclick="readadmove('1086358')">移入无限制区</a>
+            <a href="javascript:;" onclick="rpidnk('1086358','17964438')">屏蔽回帖</a>
+            <a href="javascript:;" onclick="radtip('1','1086358','17964438')">管理提示</a>
+            <script>function cztzyx(tid,pid){$.ajax({type:"POST",url:"diy_read_cztz.php",data:"tid="+tid+"&pid="+pid+"&safeid=abc12345"});}</script>
+            </div>"""
+        val page = parser.parse(html, "$origin/read.php?tid=1086358").nativePage!!
+        assertEquals(
+            listOf("rpc:recommend", "rpc:cztz:tpc", "rpc:cztz:17964438", "rpc:admove", "rpc:hide:17964438", "rpc:tip:1:17964438"),
+            page.forms.map { it.id },
+        )
+        val topic = page.forms.first { it.id == "rpc:cztz:tpc" }
+        assertEquals("$origin/diy_read_cztz.php", topic.actionUrl)
+        assertEquals(listOf("tid", "pid", "safeid"), topic.hidden.map { it.name })
+        assertEquals(listOf("1086358", "tpc", "abc12345"), topic.hidden.map { it.value },
+            "the inline script's session token is what the web control actually posts")
+        assertTrue(topic.fields.isEmpty())
+        assertEquals("提交优秀", topic.submits.single().label)
+        val move = page.forms.first { it.id == "rpc:admove" }
+        assertEquals("$origin/diy_admin_read.php", move.actionUrl)
+        assertEquals(listOf("tid", "safeid"), move.hidden.map { it.name })
+        assertEquals("safe9876", move.hidden.last().value)
+        assertEquals("$origin/kf_fw_0ladmin.php", page.forms.first { it.id == "rpc:hide:17964438" }.actionUrl)
+        assertEquals(listOf("addo", "tid", "pid"), page.forms.first { it.id == "rpc:tip:1:17964438" }.hidden.map { it.name })
+        assertTrue(page.unsupported.none { it in setOf("提交优秀", "移入无限制区", "屏蔽回帖", "管理提示") })
+    }
+
+    @Test fun readAdminFormsRequireMatchingTopicTrustedArgsAndSessionToken() {
+        val html = """<div class="dcol" style="width:900px">
+            <input type="hidden" id="tui_tid" value="1086358">
+            <a href="javascript:;" onclick="cztzyx('999','tpc')">提交优秀</a>
+            <a href="javascript:;" onclick="readadmove('999')">移入无限制区</a>
+            <a href="javascript:;" onclick="rpidnk('1086358','17964438')">屏蔽回帖</a>
+            <a href="javascript:;" onclick="rpitnk('1086358','1')">伪操作</a>
+            </div>"""
+        val page = parser.parse(html, "$origin/read.php?tid=1086358").nativePage!!
+        assertTrue(page.forms.isEmpty(), "without a trusted token or matching tid no write control may appear")
+        assertTrue(page.unsupported.any { it.contains("伪操作") })
+    }
+
+    @Test fun readAdminFormsRejectConcatenatedScriptPayloads() {
+        val html = """<div class="dcol" style="width:900px">
+            <input type="hidden" id="safeid" value="safe9876">
+            <a href="javascript:;" onclick="cztzyx('1086358','tpc');alert(1)">提交优秀</a>
+            <a href="javascript:readadmove('1086358')">移入无限制区</a>
+            </div>"""
+        val page = parser.parse(html, "$origin/read.php?tid=1086358").nativePage!!
+        assertEquals(listOf("rpc:admove"), page.forms.map { it.id })
+    }
+
     @Test fun androidUsesNavigationComposePredictiveBackWithoutWebView() {
         val root = Path.of(System.getProperty("kf.projectRoot"))
         assertFalse(Files.readString(root.resolve("androidApp/src/main/AndroidManifest.xml")).contains("BrowserActivity"))

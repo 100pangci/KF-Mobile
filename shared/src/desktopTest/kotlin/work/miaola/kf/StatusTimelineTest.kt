@@ -14,9 +14,12 @@ class StatusTimelineTest {
             <tr><td>2026-01-04 10:00</td><td><a href='read.php?tid=4'>普通记录</a></td><td>有评分记录</td></tr>
             </table></div>"""
         val entries = parser.parse(html, "$origin/kf_fw_1wkfb.php").nativePage!!.statusTimeline!!.entries
-        assertEquals(listOf(StatusKind.COMPLETED, StatusKind.WAITING, StatusKind.AVAILABLE, StatusKind.UNKNOWN),
+        assertEquals(listOf(StatusKind.COMPLETED, StatusKind.WAITING, StatusKind.AVAILABLE, StatusKind.COMPLETED),
             entries.map { it.status })
         assertEquals("9", entries[2].action?.url?.let { Regex("ptid=([0-9]+)").find(it)?.groupValues?.get(1) })
+        assertEquals("进入评分", entries[2].action?.title)
+        assertNull(entries[0].action, "a completed row must not advertise the do=1 entry")
+        assertNull(entries[3].action, "a row with an existing rating record must not advertise the do=1 entry")
     }
 
     @Test fun completedDetailLinkIsReadOnlyAndClaimLinkRemainsAChange() {

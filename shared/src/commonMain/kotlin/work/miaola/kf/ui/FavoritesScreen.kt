@@ -61,7 +61,7 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
         } else c.requestBatchSiteSubmit(requests)
     }
     RefreshableList(timeline, { c.refreshTimeline(page) }, enabled = !managing) {
-        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 100.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, KfSpacing.FabBottom)) {
             item { ManagementRecovery(c, page.url) }
             item { Row(verticalAlignment = Alignment.CenterVertically) {
                 TextButton(onClick = { categories = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.FolderOpen, null); Text(" 收藏分类"); Icon(Icons.Default.ExpandMore, null) }
@@ -76,7 +76,7 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
             if (managing) {
                 items(activeFavorites.entries, key = { topicIdentity(it.topic.url) }) { entry ->
                     val id = entry.selectionFieldId
-                    Row(Modifier.fillMaxWidth().clickable(enabled = id != null && !c.siteBusy) {
+                    Row(Modifier.fillMaxWidth().animateItem().clickable(enabled = id != null && !c.siteBusy) {
                         if (id != null && form != null) selection.choose(form, if (id in selected) selected - id else selected + id)
                     }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(id in selected, null, enabled = id != null && !c.siteBusy)
@@ -109,9 +109,9 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
                 if (form != null && (job == null || job.options.any { it.value !in setOf("change", "clear") })) item { NativeFormCard(c, form) }
             } else {
                 val topics = timeline.topics
-                if (topics.isEmpty()) item { Text("还没有收藏主题", Modifier.padding(24.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                if (topics.isEmpty()) item { KfEmptyState(Icons.Default.BookmarkBorder, "还没有收藏主题", "阅读时点“收藏本帖”即可加入站点收藏夹。") }
                 items(topics, key = { topicIdentity(it.url) }) { topic ->
-                    Column(Modifier.fillMaxWidth().combinedClickable(onClick = { actions.open(topic.url) }, onLongClick = { managing = true })) {
+                    Column(Modifier.fillMaxWidth().animateItem().combinedClickable(onClick = { actions.open(topic.url) }, onLongClick = { managing = true })) {
                         FavoriteText(topic, Modifier.padding(vertical = 12.dp)); HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
                     }
                 }
@@ -147,16 +147,30 @@ private fun FavoriteText(topic: SiteLink, modifier: Modifier) {
 }
 
 @Composable
-internal fun MessageSummaryRow(message: NativeMessageSummary, outbox: Boolean, open: (String) -> Unit) {
-    ListItem(
-        headlineContent = { Text(message.title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = if (message.unread) FontWeight.Bold else FontWeight.Medium) },
-        supportingContent = { Column {
-            Text(if (outbox) "收件人：${message.recipient}" else message.sender, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(message.time, style = MaterialTheme.typography.labelSmall)
-        } },
-        leadingContent = { InitialAvatar(if (outbox) message.recipient else message.sender) },
-        trailingContent = { if (message.unread) Icon(Icons.Default.FiberManualRecord, "未读", Modifier.size(10.dp), tint = MaterialTheme.colorScheme.primary) },
-        modifier = Modifier.clickable { open(message.url) },
-    )
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+internal fun MessageSummaryRow(message: NativeMessageSummary, outbox: Boolean, open: (String) -> Unit, modifier: Modifier = Modifier) {
+    KfCard(onClick = { open(message.url) }, modifier = modifier, contentPadding = PaddingValues(horizontal = KfSpacing.Lg, vertical = KfSpacing.Md)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            InitialAvatar(if (outbox) message.recipient else message.sender)
+            Column(Modifier.weight(1f).padding(start = KfSpacing.Md)) {
+                Text(
+                    message.title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    fontWeight = if (message.unread) FontWeight.Bold else FontWeight.Medium,
+                )
+                Text(
+                    if (outbox) "收件人：${message.recipient}" else message.sender,
+                    Modifier.padding(top = 2.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(message.time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            }
+            if (message.unread) Icon(Icons.Default.FiberManualRecord, "未读", Modifier.size(10.dp), tint = MaterialTheme.colorScheme.primary)
+            else Icon(Icons.Default.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+        }
+    }
 }

@@ -2,13 +2,18 @@
 
 package work.miaola.kf.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -17,11 +22,32 @@ import work.miaola.kf.*
 @Composable
 internal fun ManagementRecovery(c: AppController, url: String) {
     val source = c.managementRecoveryFor(url) ?: return
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Text("上次操作后的列表待核对，旧选择已清除。重新加载只读取列表，不会重复删除或移动。",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-        TextButton(onClick = { c.recoverManagement(source) }, enabled = !c.busy && !c.siteBusy) {
-            Text(if (c.busy) "正在核对…" else "重新加载并核对")
+    Surface(
+        Modifier.fillMaxWidth().padding(vertical = KfSpacing.Sm),
+        shape = KfTileShape,
+        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.25f)),
+    ) {
+        Column(Modifier.padding(horizontal = KfSpacing.Lg, vertical = KfSpacing.Md)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.WarningAmber, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
+                Text(
+                    "上次操作后的列表待核对",
+                    Modifier.padding(start = 6.dp),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+            Text(
+                "旧选择已清除。重新加载只读取列表，不会重复删除或移动。",
+                Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
+            )
+            TextButton(onClick = { c.recoverManagement(source) }, enabled = !c.busy && !c.siteBusy) {
+                Text(if (c.busy) "正在核对…" else "重新加载并核对")
+            }
         }
     }
 }
@@ -104,10 +130,16 @@ internal fun RefreshableList(timeline: PageTimeline?, onRefresh: () -> Unit, ena
 @Composable
 internal fun NextPageFooter(c: AppController, page: PageData, timeline: PageTimeline?) {
     if (timeline == null || timeline.next == null) return
-    Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxWidth().padding(vertical = KfSpacing.Lg), contentAlignment = Alignment.Center) {
         when {
-            timeline.loading -> CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            timeline.failure != null -> TextButton(onClick = { c.loadNext(page, retry = true) }) { Text("加载失败 · 点击重试") }
+            timeline.loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text("正在加载更多", Modifier.padding(start = KfSpacing.Sm), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            timeline.failure != null -> TextButton(onClick = { c.loadNext(page, retry = true) }) {
+                Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                Text("加载失败 · 点击重试", Modifier.padding(start = 4.dp))
+            }
         }
     }
 }

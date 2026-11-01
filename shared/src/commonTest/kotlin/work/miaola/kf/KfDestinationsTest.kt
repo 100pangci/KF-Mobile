@@ -35,6 +35,13 @@ class KfDestinationsTest {
         assertTrue(KfDestinations.isSearchNavigation("search.php?step=2&searchid=abc&page=2"))
         assertFalse(KfDestinations.isSearchNavigation("search.php?step=2&keyword=x"))
         assertFalse(KfDestinations.isSearchNavigation("search.php?searchid=abc&action=delete"))
+        assertTrue(KfDestinations.isSearchNavigation("search.php?authorid=688495"))
+        assertTrue(KfDestinations.isSearchNavigation("search.php?authorid=688495&sch_area=2"))
+        assertTrue(KfDestinations.isSearchNavigation("search.php?authorid=688495&sch_area=2&page=2"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?authorid=abc"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?authorid=1&keyword=x"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?authorid=1&sch_area=1"))
+        assertFalse(KfDestinations.isSearchNavigation("search.php?authorid=1&action=delete"))
     }
 
     @Test fun messageBoxLinksNeverAskForAWriteConfirmation() {

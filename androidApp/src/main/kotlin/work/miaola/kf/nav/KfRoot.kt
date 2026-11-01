@@ -4,6 +4,7 @@ package work.miaola.kf.nav
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -228,7 +229,7 @@ private fun KfRootForServer(
             KfDestinationKind.SETTINGS -> "偏好与连接"
             KfDestinationKind.LOGIN -> "登录绯月"
             KfDestinationKind.EDITOR -> "写点什么"
-            KfDestinationKind.MESSAGES -> page?.title ?: "消息"
+            KfDestinationKind.MESSAGES -> "消息"
             KfDestinationKind.SEARCH -> page?.title ?: "搜索"
             KfDestinationKind.MESSAGE, KfDestinationKind.PROFILE, KfDestinationKind.NATIVE ->
                 page?.nativePage?.title ?: page?.title ?: "更多功能"
@@ -314,17 +315,20 @@ private fun KfRootForServer(
                 containerColor = MaterialTheme.colorScheme.background,
                 topBar = {
                     if (location.kind != KfDestinationKind.SEARCH) {
-                    KfTopBar(
-                        title = title,
-                        root = location.kind.isTopLevel,
-                        showBack = canGoBack,
-                        kind = location.kind,
-                        c = c,
-                        page = page,
-                        actions = actions,
-                        onBack = ::back,
-                        onRefresh = ::refresh,
-                    )
+                    Column {
+                        KfTopBar(
+                            title = title,
+                            root = location.kind.isTopLevel,
+                            showBack = canGoBack,
+                            kind = location.kind,
+                            c = c,
+                            page = page,
+                            actions = actions,
+                            onBack = ::back,
+                            onRefresh = ::refresh,
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                    }
                     }
                 },
                 bottomBar = {
@@ -333,7 +337,10 @@ private fun KfRootForServer(
                         enter = expandVertically(tween(KfMotion.Chrome, easing = KfMotion.BackEasing)) + fadeIn(tween(KfMotion.Chrome)),
                         exit = shrinkVertically(tween(KfMotion.Chrome, easing = KfMotion.BackEasing)) + fadeOut(tween(KfMotion.Chrome)),
                     ) {
-                        KfBottomBar(location.kind, actions)
+                        Column {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                            KfBottomBar(location.kind, actions)
+                        }
                     }
                 },
                 floatingActionButton = {
@@ -413,7 +420,7 @@ private fun KfRootForServer(
                             val url = entry.arguments?.getString("url").orEmpty()
                             val listPage = c.pageFor(url)
                             LaunchedEffect(url) { c.ensurePage(url) }
-                            if (listPage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) }) else ListingScreen(c, actions, listPage, isMessages = false, rich = richContent)
+                            if (listPage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) }) else ListingScreen(c, actions, listPage, isMessages = false, rich = richContent, showTitle = false)
                         }
                         composable(
                             KfRoutes.READER,
@@ -423,7 +430,7 @@ private fun KfRootForServer(
                             val readerPage = c.pageFor(url)
                             LaunchedEffect(url) { c.ensurePage(url) }
                             if (readerPage == null) KfLoading(c, onRetry = { c.ensurePage(url, force = true) })
-                            else ReaderScreen(c, actions, readerPage, forumAvatar, richContent)
+                            else ReaderScreen(c, actions, readerPage, forumAvatar, richContent, showTitle = false)
                         }
                         composable(
                             KfRoutes.MESSAGES,
@@ -518,7 +525,7 @@ private fun KfNativeDestination(
 
 @Composable
 private fun KfLoading(c: AppController, message: String = "正在连接绯月…", onRetry: () -> Unit) {
-    KfPageLoadState(c.busy, c.error, onRetry, message)
+    KfPageLoadState(c.busy || c.loadingEditor, c.error, onRetry, message)
 }
 
 @Composable
@@ -536,7 +543,13 @@ private fun KfTopBar(
     TopAppBar(
         title = {
             Column {
-                Text(title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Crossfade(
+                    targetState = title,
+                    animationSpec = tween(KfMotionSpec.Quick),
+                    label = "topBarTitle",
+                ) { value ->
+                    Text(value, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 if (root) Text("SCARLET MOON", style = MaterialTheme.typography.labelSmall, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.primary)
             }
         },

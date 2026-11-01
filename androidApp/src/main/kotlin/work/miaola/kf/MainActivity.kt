@@ -43,18 +43,24 @@ class MainActivity : ComponentActivity() {
     private lateinit var controller: AppController
     private var picker: FilePickerRequest? = null
     private var pendingSave: NativeDownloadRequest? = null
+    private var pendingBytesSave: NativeFileSave? = null
     private var lastSessionCheck = android.os.SystemClock.elapsedRealtime()
     private val pickMultiple = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { receivedFiles(it) }
     private val pickSingle = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> receivedFiles(listOfNotNull(uri)) }
     private val pickAvatar = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> receivedAvatar(uri) }
     private val saveFile = registerForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
         val request = pendingSave; pendingSave = null
-        if (uri != null && request != null) screenScope.launch {
+        val bytesRequest = pendingBytesSave; pendingBytesSave = null
+        if (uri != null && (request != null || bytesRequest != null)) screenScope.launch {
             try {
                 withContext(Dispatchers.IO) {
                     contentResolver.openOutputStream(uri)?.use { output ->
-                        if (request.isImage) saveOriginalImage(this@MainActivity, controller.origin, request.url, output)
-                        else (application as KfApplication).services.create(controller.origin).download(request.url, output)
+                        when {
+                            bytesRequest != null -> output.write(bytesRequest.bytes)
+                            request != null && request.isImage -> saveOriginalImage(this@MainActivity, controller.origin, request.url, output)
+                            request != null -> (application as KfApplication).services.create(controller.origin).download(request.url, output)
+                            else -> error("无法写入所选位置")
+                        }
                     } ?: error("无法写入所选位置")
                 }
                 controller.reportPlatformResult("已保存到所选位置")
@@ -91,6 +97,12 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(controller.downloadRequest) {
                 controller.downloadRequest?.let { request ->
                     pendingSave = request; controller.consumeDownloadRequest()
+                    saveFile.launch(request.suggestedName.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(140))
+                }
+            }
+            LaunchedEffect(controller.fileSaveRequest) {
+                controller.fileSaveRequest?.let { request ->
+                    pendingBytesSave = request; controller.consumeFileSaveRequest()
                     saveFile.launch(request.suggestedName.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(140))
                 }
             }

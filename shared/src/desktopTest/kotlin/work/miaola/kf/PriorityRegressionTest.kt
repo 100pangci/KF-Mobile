@@ -229,8 +229,11 @@ class PriorityRegressionTest {
         }
     }
 
-    @Test fun unverifiedTrackingDetailsAndBankMutationsStillRequireManualVerification() {
-        listOf("message.php?action=readscout&mid=1", "hack.php?H_name=bank&action=virement",
+    @Test fun trackingDetailsAreReadOnlyButBankMutationsStillRequireManualVerification() {
+        assertEquals(SiteEffect.READ, SiteRoutePolicy(origin).classify("message.php?action=readscout&mid=1").effect)
+        assertTrue(AuditReadPolicy(origin).allows("message.php?action=readscout&mid=1"))
+        assertEquals(SiteEffect.CHANGE, SiteRoutePolicy(origin).classify("message.php?action=readscout&mid=1&del=1").effect)
+        listOf("hack.php?H_name=bank&action=virement",
             "hack.php?H_name=bank&action=log&to=2").forEach { route ->
             assertEquals(SiteEffect.CHANGE, SiteRoutePolicy(origin).classify(route).effect)
             assertFalse(AuditReadPolicy(origin).allows(route))
@@ -239,20 +242,25 @@ class PriorityRegressionTest {
         assertTrue(AuditReadPolicy(origin).allows("hack.php?H_name=bank&action=log&to=1"))
     }
 
-    @Test fun explicitlyConfirmedTrackingDetailDoesNotPretendToBeADeletionReceipt() = runTest {
+    @Test fun trackingDetailOpensReadOnlyWithoutPretendingToBeADeletionReceipt() = runTest {
         val demo = DemoService(origin)
         val scout = demo.home.copy(url = "$origin/message.php?action=scout")
         val detail = scout.copy(url = "$origin/message.php?action=readscout&mid=1", topics = emptyList(), nativePage = NativeSitePage("跟踪详情", sections = listOf(NativeSection("", "合成详情"))))
         var scoutReads = 0
+        var writes = 0
         val client = object : ForumService by demo {
-            override suspend fun fetch(url: String) = if (url == scout.url) { scoutReads++; scout } else demo.fetch(url)
-            override suspend fun executeSite(destination: SiteDestination) = SiteActionResult.Response(detail)
+            override suspend fun fetch(url: String) = when (url) {
+                scout.url -> { scoutReads++; scout }
+                detail.url -> detail
+                else -> demo.fetch(url)
+            }
+            override suspend fun executeSite(destination: SiteDestination): SiteActionResult { writes++; return SiteActionResult.Response(detail) }
         }
         val c = AppController(MemoryStore(), factory(client), backgroundScope, { _, _ -> })
         runCurrent(); c.load(scout.url); runCurrent()
-        c.openSiteDestination(c.resolve(detail.url)); runCurrent(); assertNotNull(c.pendingSiteDestination)
-        c.confirmSiteAction(); runCurrent()
-        assertEquals(1, scoutReads); assertEquals(detail.url, c.pendingNativePage); assertEquals(scout.url, c.pageFor(scout.url)?.url)
+        c.openSiteDestination(c.resolve(detail.url)); runCurrent()
+        assertNull(c.pendingSiteDestination); assertEquals(0, writes); assertEquals(detail.url, c.page?.url)
+        assertEquals(1, scoutReads); assertNotNull(c.page?.nativePage)
         c.close()
     }
 }

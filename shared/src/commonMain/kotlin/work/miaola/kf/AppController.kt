@@ -73,6 +73,13 @@ class AppController(
     var gugu by mutableStateOf<GuguSnapshot?>(null); private set
     var guguBusy by mutableStateOf(false); private set
     var guguError by mutableStateOf<String?>(null); private set
+    var guguActionBusy by mutableStateOf(false); private set
+    var pendingGuguAction by mutableStateOf<GuguAction?>(null); private set
+    var guguActionInput by mutableStateOf(""); private set
+    var guguActionValues by mutableStateOf<Map<String, String>>(emptyMap()); private set
+    var guguMenu by mutableStateOf<GuguMenu?>(null); private set
+    var messageExportBusy by mutableStateOf(false); private set
+    var fileSaveRequest by mutableStateOf<NativeFileSave?>(null); private set
     var filePickerRequest by mutableStateOf<FilePickerRequest?>(null); private set
     var downloadRequest by mutableStateOf<NativeDownloadRequest?>(null); private set
     var editorFiles by mutableStateOf<List<LocalUpload>>(emptyList()); private set
@@ -1395,6 +1402,14 @@ class AppController(
                         }
                         formFiles = emptyMap()
                         toast = when {
+                            // Entering the rating workflow opens the site's own
+                            // form; it is not a completed mutation, so do not
+                            // reuse the generic "submitted, refresh" receipt.
+                            result.uncertainReceipt != null && link?.url?.let { url ->
+                                url.substringBefore('?').endsWith("/kf_fw_1wkfb.php") &&
+                                    Regex("[?&]do=1(?:&|$)").containsMatchIn(url)
+                            } == true && result.page.nativePage?.forms?.any { it.title == "帖子评分" } == true ->
+                                result.page.notice.ifBlank { "已进入评分页，请核对后提交" }
                             result.uncertainReceipt != null -> "操作已提交，请刷新核对结果"
                             managedFresh -> response.let { (it as? SiteActionResult.Response)?.page?.notice }.orEmpty().ifBlank { "列表已重新加载，请核对操作结果" }
                             direct -> result.page.notice.ifBlank { SiteActionRisk.successMessage(link) }
@@ -1762,10 +1777,48 @@ class AppController(
         }
     }
 
+    /** Downloads the selected mailbox entries through the site's action=down form. */
+    fun exportMessages(form: SiteForm, selectedFieldIds: Set<String>) {
+        if (messageExportBusy || siteBusy || batchBusy || rewardBusy || avatarBusy || busy || purchaseBusy || dailyBusy) return
+        val selectionFields = form.fields.filter { it.name == "delid[]" }
+        val selected = selectionFields.filter { it.id in selectedFieldIds }
+            .flatMap { field -> field.options.map { option -> option.value } }
+            .filter { it.matches(Regex("[0-9]{1,20}")) }
+        if (selectionFields.isNotEmpty() && selected.isEmpty()) {
+            error = "请选择要导出的消息"
+            return
+        }
+        val values = form.hidden.filterNot { it.name == "action" }.toMutableList()
+        selected.distinct().forEach { values.add(FormValue("delid[]", it)) }
+        values.add(FormValue("action", "down"))
+        messageExportBusy = true
+        error = null
+        val expected = origin
+        val client = service
+        scope.launch {
+            try {
+                when (val result = client.exportMessages(MessageExportRequest(form.sourceUrl, form, values))) {
+                    is MessageExportResult.Success -> if (origin == expected) {
+                        fileSaveRequest = NativeFileSave(result.fileName, result.bytes, result.mimeType)
+                        toast = "消息已导出，请选择保存位置"
+                    }
+                    is MessageExportResult.Rejected -> if (origin == expected) error = result.message
+                    is MessageExportResult.Uncertain -> if (origin == expected) error = result.message
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) {
+                if (origin == expected) error = "消息导出结果无法确认；请先核对，客户端不会自动重试"
+            } finally { if (origin == expected) messageExportBusy = false }
+        }
+    }
+
+    fun consumeFileSaveRequest() { fileSaveRequest = null }
+
     fun loadGugu(force: Boolean = false) {
-        if (guguBusy || (!force && gugu != null)) return
+        if (guguBusy || guguActionBusy || (!force && gugu != null)) return
         guguBusy = true
         guguError = null
+        guguMenu = null
         val expected = origin
         scope.launch {
             try {
@@ -1778,6 +1831,115 @@ class AppController(
             } catch (_: Exception) {
                 if (origin == expected) guguError = "咕咕镇暂时无法读取；游戏数据不会在本机缓存。"
             } finally { if (origin == expected) guguBusy = false }
+        }
+    }
+
+    /** Asks for confirmation before any game mutation; nothing is sent yet. */
+    fun requestGuguAction(action: GuguAction) {
+        if (guguActionBusy || pendingGuguAction != null || guguBusy || guguMenu != null) return
+        guguActionInput = action.inputDefault
+        guguActionValues = action.fields.associate { it.name to it.defaultValue }
+        guguError = null
+        pendingGuguAction = action
+    }
+
+    /** Revalidates one exact option from the last menu before opening its confirmation. */
+    fun chooseGuguMenu(action: GuguAction) {
+        val menu = guguMenu ?: return
+        if (menu.actions.none { it.id == action.id && it.kind == action.kind }) {
+            guguMenu = null
+            guguError = "菜单选项已过期，请重新打开"
+            return
+        }
+        guguMenu = null
+        guguError = null
+        requestGuguAction(action)
+    }
+
+    fun cancelGuguMenu() {
+        if (guguActionBusy) return
+        guguMenu = null
+        guguError = null
+    }
+
+    fun clearGuguError() { guguError = null }
+
+    fun updateGuguActionInput(value: String) {
+        if (pendingGuguAction == null || guguActionBusy) return
+        guguActionInput = value.take(20)
+    }
+
+    fun guguActionValue(name: String): String = guguActionValues[name].orEmpty()
+
+    fun updateGuguActionValue(name: String, value: String) {
+        val action = pendingGuguAction ?: return
+        if (guguActionBusy) return
+        val field = action.fields.firstOrNull { it.name == name } ?: return
+        guguActionValues = guguActionValues + (name to value.take(field.maxLength))
+    }
+
+    fun cancelGuguAction() {
+        if (guguActionBusy) return
+        pendingGuguAction = null
+        guguActionInput = ""
+        guguActionValues = emptyMap()
+    }
+
+    fun confirmGuguAction() {
+        val action = pendingGuguAction ?: return
+        if (guguActionBusy) return
+        if (action.inputLabel.isNotBlank() && !guguActionInput.trim().matches(Regex("[0-9]{1,9}"))) {
+            guguError = "请输入非负整数后再提交"
+            return
+        }
+        action.fields.forEach { field ->
+            val value = guguActionValues[field.name].orEmpty().trim()
+            if (field.numeric && !value.matches(Regex("[0-9]{1,9}"))) {
+                guguError = "${field.label}必须是非负整数"
+                return
+            }
+        }
+        if (action.kind == GuguActionKind.RENAME &&
+            guguActionValues["name"].orEmpty().trim().isEmpty()) {
+            guguError = "角色名不能为空"
+            return
+        }
+        guguActionBusy = true
+        guguError = null
+        val expected = origin
+        scope.launch {
+            try {
+                when (val result = service.guguAction(GuguActionRequest(action, guguActionInput.trim(),
+                    guguActionValues.mapValues { it.value.trim() }))) {
+                    is GuguActionResult.Success -> if (origin == expected) {
+                        result.snapshot?.let { gugu = it }
+                        toast = result.message
+                    }
+                    is GuguActionResult.Rejected -> if (origin == expected) guguError = result.message
+                    is GuguActionResult.Uncertain -> if (origin == expected) {
+                        result.snapshot?.let { gugu = it }
+                        guguError = result.message
+                    }
+                    is GuguActionResult.Choices -> if (origin == expected) {
+                        result.snapshot?.let { gugu = it }
+                        if (result.menu.actions.isEmpty()) guguError = "服务器没有返回可执行菜单选项"
+                        else {
+                            guguMenu = result.menu
+                            guguError = null
+                        }
+                    }
+                }
+            } catch (e: CancellationException) { throw e
+            } catch (_: Exception) {
+                if (origin == expected) guguError = "操作结果无法确认；客户端不会自动重试，请重新读取后核对"
+            } finally {
+                if (origin == expected) {
+                    guguActionBusy = false
+                    pendingGuguAction = null
+                    guguActionInput = ""
+                    guguActionValues = emptyMap()
+                }
+            }
         }
     }
 
@@ -1833,6 +1995,10 @@ class AppController(
         pendingReward = null; rewardBusy = false
         pendingAvatar = null; avatarBusy = false
         gugu = null; guguBusy = false; guguError = null
+        guguActionBusy = false; pendingGuguAction = null; guguActionInput = ""
+        guguActionValues = emptyMap()
+        guguMenu = null
+        messageExportBusy = false; fileSaveRequest = null
         lastSearchKeyword = ""; lastSearchAuthor = ""
         messageListUrl = null
         showSiteTools = false; pendingNativePage = null; pendingSiteDestination = null; pendingSiteSubmission = null

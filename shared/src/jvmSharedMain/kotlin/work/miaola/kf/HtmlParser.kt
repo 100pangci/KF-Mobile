@@ -1,19 +1,92 @@
 package work.miaola.kf
 
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.FormElement
 import org.jsoup.safety.Safelist
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 
 class ForumHtmlParser(private val origin: String) {
     private val routes = SiteRoutePolicy(origin)
     private val base = origin.toHttpUrl()
     fun resolve(raw: String, from: String = "$origin/"): String? {
         val url = from.toHttpUrl().resolve(raw) ?: return null
-        val canonical = if (url.encodedQuery == "") url.newBuilder().query(null).build() else url
+        // The site is GBK. OkHttp canonicalises raw Chinese query values as
+        // UTF-8 percent escapes, which the server cannot match (for example
+        // guanjianci.php?gjc=... returns an empty keyword). Re-encode query
+        // values that are valid UTF-8 text containing non-ASCII characters.
+        val gbk = reencodeQueryToGbk(url)
+        val canonical = if (gbk.encodedQuery == "") gbk.newBuilder().query(null).build() else gbk
         return canonical.takeIf { it.scheme == "https" && it.host == base.host && it.port == base.port && it.username.isEmpty() && it.password.isEmpty() }?.toString()
+    }
+
+    private fun reencodeQueryToGbk(url: HttpUrl): HttpUrl {
+        val query = url.encodedQuery ?: return url
+        val rewritten = query.split('&').joinToString("&") { pair ->
+            val index = pair.indexOf('=')
+            if (index <= 0) pair
+            else pair.substring(0, index) + "=" + gbkPercentIfUtf8(pair.substring(index + 1))
+        }
+        return if (rewritten == query) url else url.newBuilder().encodedQuery(rewritten).build()
+    }
+
+    /**
+     * Leave ASCII and already-GBK values untouched. Only a value whose percent
+     * bytes decode as strict UTF-8 containing non-ASCII text is re-encoded.
+     */
+    private fun gbkPercentIfUtf8(encoded: String): String {
+        val bytes = percentDecode(encoded) ?: return encoded
+        val text = try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(bytes))
+                .toString()
+        } catch (_: Exception) { return encoded }
+        if (text.all { it.code < 128 }) return encoded
+        val gbk = try { gbkBytes(text) } catch (_: Exception) { return encoded }
+        return buildString(gbk.size * 3) {
+            gbk.forEach { byte ->
+                val value = byte.toInt() and 255
+                if (value in 65..90 || value in 97..122 || value in 48..57 || value in listOf(45, 46, 95, 126)) {
+                    append(value.toChar())
+                } else {
+                    append('%'); append("0123456789ABCDEF"[value shr 4]); append("0123456789ABCDEF"[value and 15])
+                }
+            }
+        }
+    }
+
+    private fun percentDecode(encoded: String): ByteArray? {
+        val out = java.io.ByteArrayOutputStream(encoded.length)
+        var index = 0
+        while (index < encoded.length) {
+            val char = encoded[index]
+            if (char == '%') {
+                if (index + 2 >= encoded.length) return null
+                val high = hexValue(encoded[index + 1])
+                val low = hexValue(encoded[index + 2])
+                if (high < 0 || low < 0) return null
+                out.write((high shl 4) or low)
+                index += 3
+            } else {
+                if (char.code > 127) return null
+                out.write(char.code)
+                index++
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun hexValue(char: Char): Int = when (char) {
+        in '0'..'9' -> char - '0'
+        in 'a'..'f' -> char - 'a' + 10
+        in 'A'..'F' -> char - 'A' + 10
+        else -> -1
     }
 
     fun document(html: String, url: String) = Jsoup.parse(html, url)
@@ -50,13 +123,51 @@ class ForumHtmlParser(private val origin: String) {
         val path = url.toHttpUrl().pathSegments.lastOrNull()
         val title = doc.title().substringBefore(" - ").substringBefore('|').trim().ifEmpty { "绯月" }
         val authenticated = loggedIn(doc)
-        val username = if (authenticated) doc.selectFirst("#kf_topuser")?.text()?.trim().orEmpty() else ""
+        val username = if (authenticated) {
+            // The header appends status badges as <span> children (e.g. [！]
+            // for an unread notification); they are not part of the account
+            // name and must not leak into replies or account comparisons.
+            doc.selectFirst("#kf_topuser")?.clone()?.apply { select("span").remove() }?.text()?.trim().orEmpty()
+        } else ""
         val boards = doc.select("a[href*='thread.php?fid=']").mapNotNull { a ->
             val group = a.parents().firstOrNull { it.hasClass("topmenuo3") }?.ownText().orEmpty()
             link(a, group)
         }.filter { it.url.toHttpUrl().queryParameterNames == setOf("fid") }.distinctBy { it.url }
         val menu = doc.select("#kf_information a[href]").mapNotNull { link(it) }
             .filterNot { it.url.toHttpUrl().queryParameter("action") == "quit" }
+        // The top navigation mixes board groups with standalone tools. Boards
+        // are already listed separately; keep the remaining entries (notably
+        // 最新共享 and the external game-info pages) so they stay reachable.
+        val topSiteLinks = doc.select("li.topmenuo3 a[href]").mapNotNull { a ->
+            val raw = a.attr("href").trim()
+            if (raw.isBlank() || raw.startsWith("javascript:", true)) return@mapNotNull null
+            val target = if (raw.startsWith("https://")) {
+                runCatching { raw.toHttpUrl() }.getOrNull() ?: return@mapNotNull null
+            } else {
+                resolve(raw, url)?.toHttpUrl() ?: return@mapNotNull null
+            }
+            if (target.host == base.host && target.pathSegments.lastOrNull() in setOf("", "index.php", "thread.php")) return@mapNotNull null
+            val label = a.text().trim().ifBlank { a.attr("title").trim() }
+            label.takeIf { it.isNotBlank() }?.let { SiteLink(it, target.toString()) }
+        }
+        // The page footer is outside the main content column. It carries the
+        // signed Gugu entry (the native client reads the xl=2 line) and the
+        // site's friend links; keep the same-origin game entry only when it
+        // matches the protocol the client actually loads.
+        val footerSiteLinks = doc.select("table[width=1200] a[href]").mapNotNull { a ->
+            val raw = a.attr("href").trim()
+            if (raw.isBlank() || raw.startsWith("javascript:", true)) return@mapNotNull null
+            val target = if (raw.startsWith("https://")) {
+                runCatching { raw.toHttpUrl() }.getOrNull() ?: return@mapNotNull null
+            } else {
+                resolve(raw, url)?.toHttpUrl() ?: return@mapNotNull null
+            }
+            if (target.host == base.host && (target.pathSegments.lastOrNull() != "fyg_sjcdwj.php" ||
+                    target.queryParameter("go") != "play" || target.queryParameter("xl") != "2")) return@mapNotNull null
+            val label = a.text().trim().ifBlank { a.attr("title").trim() }
+            label.takeIf { it.isNotBlank() }?.let { SiteLink(it, target.toString()) }
+        }
+        val siteLinks = (topSiteLinks + footerSiteLinks).distinctBy { it.url }
         val topics = when (path) {
             "thread.php" -> doc.select(".threadtit1 a[href*='read.php?']").filter { resolve(it.attr("href"), url)?.toHttpUrl()?.queryParameter("tid") != null }.mapNotNull { a ->
                 val row = a.closest("tr")
@@ -114,6 +225,7 @@ class ForumHtmlParser(private val origin: String) {
             else -> AuthStatus.UNKNOWN
         }
         val feeds = if (path == "index.php" || path.isNullOrEmpty()) homeFeeds(doc) else emptyList()
+        val homeSkins = if (path == "index.php" || path.isNullOrEmpty()) homeSkins(doc, url) else emptyList()
         val native = NativeSiteParser(origin, this).parse(doc, url)
         val logout = doc.select("#kf_information a[href]").firstOrNull { a ->
             resolve(a.attr("href"), url)?.toHttpUrl()?.let { it.pathSegments.lastOrNull() == "login.php" && it.queryParameter("action") == "quit" } == true
@@ -133,7 +245,23 @@ class ForumHtmlParser(private val origin: String) {
             link(a)
         }.distinctBy { it.url }.take(30) else emptyList()
         return PageData(url, title, authenticated, username, boards, topics, posts, menu, next, previous, compose, notice, status, feeds, native, logout, favorite,
-            boardFilters = boardFilters)
+            boardFilters = boardFilters, siteLinks = siteLinks, homeSkins = homeSkins)
+    }
+
+    private fun homeSkins(doc: Document, url: String): List<HomeSkin> {
+        val currentId = Regex("(?:ys/|/)bg/([0-9]{1,3})\\.(?:jpe?g|png|webp)", RegexOption.IGNORE_CASE)
+            .find(doc.head().html())?.groupValues?.get(1)
+        return doc.select("a[href*='diy_index_bg.php']").mapNotNull { a ->
+            val target = resolve(a.attr("href"), url)?.toHttpUrl() ?: return@mapNotNull null
+            if (target.encodedPath != "/diy_index_bg.php" || target.host != base.host) return@mapNotNull null
+            val id = target.queryParameter("id") ?: return@mapNotNull null
+            if (id != "999" && !id.matches(Regex("[0-9]{1,3}"))) return@mapNotNull null
+            if (target.queryParameter("safeid")?.matches(Regex("[0-9a-zA-Z]{1,32}")) != true) return@mapNotNull null
+            val rawTitle = a.attr("title").trim()
+            val title = rawTitle.ifBlank { if (id == "999") "恢复默认背景" else "站点背景 $id" }
+            val thumbnail = a.selectFirst("img[src]")?.let { resolve(it.attr("src"), url) }.orEmpty()
+            HomeSkin(id, title, thumbnail, target.toString(), id == currentId)
+        }.distinctBy { it.id }.take(20)
     }
 
     private fun homeFeeds(doc: Document): List<HomeFeedSection> {

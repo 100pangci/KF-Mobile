@@ -2,6 +2,13 @@
 
 package work.miaola.kf.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -156,7 +163,7 @@ fun KfApp(c: AppController, forumImage: ForumImage = { _, label, modifier -> Box
                     c.editor != null -> EditorScreen(c, forumImage)
                     c.tab == HomeTab.ACCOUNT && (c.page == c.home || c.page == null) -> AccountScreen(c, actions, forumAvatar, onLogout = { logout = true })
                     isNativeSitePage(c.page) -> NativeSiteScreen(c, c.page, actions, richContent, forumImage, forumAvatar)
-                    c.page?.posts?.isNotEmpty() == true -> ReaderScreen(c, actions, c.page, forumAvatar, richContent)
+                    c.page?.posts?.isNotEmpty() == true -> ReaderScreen(c, actions, c.page, forumAvatar, richContent, showTitle = false)
                     c.page?.url?.substringBefore('?')?.endsWith("thread.php") == true -> ListingScreen(c, actions, c.page, isMessages = false, rich = richContent)
                     c.page?.url?.substringBefore('?')?.endsWith("profile.php") == true -> ListingScreen(c, actions, c.page, isMessages = false, rich = richContent)
                     c.page?.url?.substringBefore('?')?.endsWith("search.php") == true -> ListingScreen(c, actions, c.page, isMessages = false)
@@ -191,12 +198,6 @@ private fun tabIcon(tab: HomeTab): ImageVector = when (tab) {
 }
 
 @Composable
-private fun FeedHeader() {
-    Text("游戏 · 动漫 · 生活", Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-}
-
-@Composable
 fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
     if (page == null) { KfPageLoadState(c.busy, c.error, { c.ensurePage("index.php", true) }); return }
     val sections = page.feeds
@@ -210,14 +211,31 @@ fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
     } }
     var sectionId by rememberSaveable { mutableStateOf(ordered.firstOrNull()?.id.orEmpty()) }
     val active = ordered.firstOrNull { it.id == sectionId } ?: ordered.firstOrNull()
+    // The homepage's right column carries the site's quick entries. The feed
+    // screen otherwise ignores generic links, which made 争夺奖励 and 进度分
+    // unreachable; keep only the four known site tools here.
+    val quickLinks = remember(page) {
+        val seen = mutableSetOf<String>()
+        page.nativePage?.links.orEmpty().mapNotNull { link ->
+            val path = link.url.substringBefore('?')
+            val fallback = when {
+                path.endsWith("/kf_growup.php") -> "签到与成长"
+                path.endsWith("/kf_fw_1wkfb.php") -> "自助评分"
+                path.endsWith("/kf_fw_ig_index.php") -> "争夺奖励"
+                path.endsWith("/kf_lv200.php") -> "进度分"
+                else -> return@mapNotNull null
+            }
+            val label = if (path.endsWith("/kf_growup.php")) fallback else link.title.ifBlank { fallback }
+            if (!seen.add(path)) null else link.copy(title = label)
+        }
+    }
     val savedSections = rememberSaveableStateHolder()
     savedSections.SaveableStateProvider(active?.id ?: "default") {
     val state = rememberLazyListState()
     val timeline = ListInteractions(c, state, page, HomeTab.FEED)
     val topics = if (ordered.isEmpty()) timeline?.topics ?: page.topics else timeline?.feedTopics?.get(active?.id) ?: active?.topics.orEmpty()
     RefreshableList(timeline, { c.refreshTimeline(page) }) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 4.dp, 16.dp, 100.dp)) {
-        item { FeedHeader() }
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.ListBottom)) {
         if (ordered.isNotEmpty()) item {
             SecondaryTabRow(selectedTabIndex = ordered.indexOf(active).coerceAtLeast(0), containerColor = MaterialTheme.colorScheme.background) {
                 ordered.forEach { section ->
@@ -226,8 +244,23 @@ fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
                 }
             }
         }
+        if (quickLinks.isNotEmpty()) item {
+            FlowRow(Modifier.padding(vertical = KfSpacing.Xs),
+                horizontalArrangement = Arrangement.spacedBy(KfSpacing.Sm),
+                verticalArrangement = Arrangement.spacedBy(KfSpacing.Sm)) {
+                quickLinks.forEach { link ->
+                    SuggestionChip(onClick = { actions.open(link.url) }, label = { Text(link.title, maxLines = 1) }, shape = KfPillShape)
+                }
+            }
+        }
         if (topics.isEmpty()) item { EmptyState(false, page.notice, onRetry = { c.refreshTimeline(page) }) }
-        items(topics, key = { topicIdentity(it.url) }) { TopicCard(it, actions.open, timeInHeader = true) }
+        items(topics, key = { topicIdentity(it.url) }) { topic ->
+            TopicCard(
+                topic, actions.open, timeInHeader = true,
+                hideGroup = active?.title?.let { it == topic.group } == true,
+                modifier = Modifier.animateItem(),
+            )
+        }
         item("next") { NextPageFooter(c, page, timeline) }
     }
     }
@@ -235,13 +268,20 @@ fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
 }
 
 @Composable
-private fun TopicCard(link: SiteLink, onClick: (String) -> Unit, timeInHeader: Boolean = false) {
+private fun TopicCard(
+    link: SiteLink,
+    onClick: (String) -> Unit,
+    timeInHeader: Boolean = false,
+    hideGroup: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     val time = link.subtitle.trim().takeIf { timeInHeader && it.isNotBlank() }
-    val hasHeader = link.group.isNotBlank() || time != null
-    Column(Modifier.fillMaxWidth().clickable { onClick(link.url) }) {
+    val group = link.group.takeUnless { hideGroup || it.isBlank() }
+    val hasHeader = group != null || time != null
+    Column(modifier.fillMaxWidth().clickable { onClick(link.url) }) {
         Column(Modifier.padding(horizontal = 2.dp, vertical = 11.dp)) {
             if (hasHeader) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (link.group.isNotBlank()) Text(link.group, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                if (group != null) Text(group, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
                 time?.let {
                     Spacer(Modifier.weight(1f))
                     Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -264,19 +304,28 @@ fun BoardsScreen(c: AppController, actions: KfActions, page: PageData? = c.home)
     var filter by rememberSaveable { mutableStateOf("") }
     val boards = remember(page.boards, filter) { page.boards.filter { it.title.contains(filter, true) } }
     RefreshableList(timeline, { c.refreshTimeline(page) }) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Text("找一个喜欢的角落", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
-        item { OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(), placeholder = { Text("筛选板块") }, leadingIcon = { Icon(Icons.Default.Search, null) }, shape = RoundedCornerShape(20.dp), singleLine = true) }
+        item { OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth(), placeholder = { Text("筛选板块") }, leadingIcon = { Icon(Icons.Default.Search, null) }, shape = KfFieldShape, singleLine = true) }
         if (boards.isEmpty()) item { EmptyState(false, if (filter.isBlank()) "暂未加载到板块" else "没有匹配的板块", { c.refreshTimeline(page) }) }
         items(boards, key = { it.url }) { board ->
-            Card(onClick = { actions.open(board.url) }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
-                Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.AutoMirrored.Filled.Chat, null, Modifier.padding(12.dp)) }
-                    Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-                        Text(board.title, fontWeight = FontWeight.Medium)
-                        Text("进入板块", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            KfCard(onClick = { actions.open(board.url) }, modifier = Modifier.animateItem(), contentPadding = PaddingValues(horizontal = KfSpacing.Lg, vertical = KfSpacing.Md)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = KfTileShape, color = MaterialTheme.colorScheme.primaryContainer) { Icon(Icons.AutoMirrored.Filled.Chat, null, Modifier.padding(11.dp).size(20.dp)) }
+                    Text(board.title, Modifier.weight(1f).padding(horizontal = KfSpacing.Md), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.Default.ChevronRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.outline)
+                }
+            }
+        }
+        if (filter.isBlank() && page.siteLinks.isNotEmpty()) {
+            item { KfSectionTitle("站点功能", Modifier.padding(top = KfSpacing.Md), icon = Icons.Default.Apps) }
+            items(page.siteLinks, key = { "site:${it.url}" }) { link ->
+                KfCard(onClick = { actions.open(link.url) }, modifier = Modifier.animateItem(), contentPadding = PaddingValues(horizontal = KfSpacing.Lg, vertical = KfSpacing.Md)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(shape = KfTileShape, color = MaterialTheme.colorScheme.secondaryContainer) { Icon(Icons.Default.Apps, null, Modifier.padding(11.dp).size(20.dp)) }
+                        Text(link.title, Modifier.weight(1f).padding(horizontal = KfSpacing.Md), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Icon(Icons.Default.ChevronRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.outline)
                     }
-                    Icon(Icons.Default.ChevronRight, null)
                 }
             }
         }
@@ -285,11 +334,9 @@ fun BoardsScreen(c: AppController, actions: KfActions, page: PageData? = c.home)
 }
 
 @Composable
-fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessages: Boolean, search: Pair<String, String>? = null, rich: RichContent? = null) {
+fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessages: Boolean, search: Pair<String, String>? = null, rich: RichContent? = null, showTitle: Boolean = true) {
     if (page?.nativePage?.favorites != null) { FavoritesScreen(c, page, actions, rich); return }
     val state = rememberLazyListState()
-    val messageTitle = when { page?.url?.contains("action=sendbox") == true -> "发件箱"; page?.url?.contains("action=scout") == true -> "消息跟踪"; else -> "收件箱" }
-    var menu by remember { mutableStateOf(false) }
     var managing by rememberSaveable(page?.url) { mutableStateOf(false) }
     val timeline = ListInteractions(c, state, page, if (isMessages) HomeTab.MESSAGES else null, enabled = !managing)
     val topics = timeline?.topics ?: page?.topics.orEmpty()
@@ -316,29 +363,36 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
         }
     }
     RefreshableList(timeline, { page?.let { c.refreshTimeline(it, search) } }, enabled = !managing) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 6.dp, 16.dp, 110.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.FabBottom)) {
+        if (isMessages) item { MessageTabs(page?.url.orEmpty(), managing, actions) { managing = it } }
         item {
-            Row(verticalAlignment = Alignment.Top) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(if (isMessages) { if (managing) "消息管理" else messageTitle } else page?.title ?: "话题", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    val heading = if (!isMessages && showTitle) page?.title ?: "话题" else null
+                    if (heading != null) Text(heading, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                     Text(
                         if (isMessages && managing) "勾选后批量删除 · ${bulkFields.size} 条" else "${if (isMessages && messages.isNotEmpty()) messages.size else topics.size} 条",
-                        Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        Modifier.padding(top = if (heading != null) 4.dp else 0.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (isMessages) Box {
-                    IconButton(onClick = { menu = true }, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.MoreVert, "消息操作") }
-                    DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(text = { Text("消息跟踪") }, leadingIcon = { Icon(Icons.Default.TrackChanges, null) }, onClick = { menu = false; actions.open("message.php?action=scout") })
-                        DropdownMenuItem(text = { Text("写新消息") }, leadingIcon = { Icon(Icons.Default.Edit, null) }, onClick = { menu = false; page?.composeUrl?.let(actions.open) })
-                        DropdownMenuItem(text = { Text("屏蔽列表") }, leadingIcon = { Icon(Icons.Default.Block, null) }, onClick = { menu = false; actions.open("message.php?action=banned") })
-                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                        DropdownMenuItem(text = { Text("批量管理") }, leadingIcon = { Icon(Icons.Default.Checklist, null) }, onClick = { menu = false; managing = true })
+                if (isMessages && !managing) {
+                    val export = page?.nativePage?.messageExport?.takeIf { !it.requiresSelection }
+                    val exportForm = export?.let { option -> page?.nativePage?.forms?.firstOrNull { it.id == option.formId } }
+                    if (exportForm != null) TextButton(onClick = { c.exportMessages(exportForm, emptySet()) }, enabled = !c.messageExportBusy) {
+                        Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                        Text(if (c.messageExportBusy) " 导出中…" else " 导出")
+                    }
+                    page?.nativePage?.messageClear?.let { clear -> TextButton(onClick = { c.openSiteDestination(clear) }, enabled = !c.siteBusy) {
+                        Icon(Icons.Default.DeleteSweep, null, Modifier.size(18.dp))
+                        Text(" 清空")
+                    } }
+                    TextButton(onClick = { actions.open("message.php?action=banned") }) {
+                        Icon(Icons.Default.Block, null, Modifier.size(18.dp))
+                        Text(" 屏蔽列表")
                     }
                 }
             }
         }
-        if (isMessages) item { MessageTabs(page?.url.orEmpty(), managing, actions) { managing = it } }
         if (isMessages && page != null) item { ManagementRecovery(c, page.url) }
         if (!managing && topics.isEmpty() && (!isMessages || messages.isEmpty())) item { EmptyState(c.busy && page == null, page?.notice.orEmpty(), { page?.let { c.refreshTimeline(it, search) } }) }
         if (isMessages) {
@@ -356,10 +410,23 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                             TextButton(onClick = { selection.clear(bulkForm) }, enabled = !c.siteBusy) { Text("清空本页") }
                         }
                     }
+                    val exportOption = page?.nativePage?.messageExport
+                    val exportForm = exportOption?.let { option -> page?.nativePage?.forms?.firstOrNull { it.id == option.formId } }
+                    if (exportForm != null && exportOption?.requiresSelection == true) item {
+                        OutlinedButton(
+                            onClick = { c.exportMessages(exportForm, selected) },
+                            enabled = selected.isNotEmpty() && !c.messageExportBusy && !c.siteBusy,
+                            modifier = Modifier.fillMaxWidth().height(48.dp),
+                            shape = KfFieldShape,
+                        ) {
+                            Icon(Icons.Default.Download, null, Modifier.size(18.dp))
+                            Text(if (c.messageExportBusy) " 正在导出…" else " 导出所选（${selected.size}）")
+                        }
+                    }
                     items(bulkFields, key = { it.id }) { field ->
                         val checked = field.id in selected
                         Surface(Modifier.fillMaxWidth().clickable(enabled = !c.siteBusy) { selection.choose(bulkForm, if (checked) selected - field.id else selected + field.id) },
-                            shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            shape = KfTileShape, color = MaterialTheme.colorScheme.surfaceContainerLow,
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))) {
                             Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked, { value -> selection.choose(bulkForm, if (value) selected + field.id else selected - field.id) }, enabled = !c.siteBusy)
@@ -384,8 +451,8 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                     }
                 }
             } else {
-                if (messages.isNotEmpty()) items(messages, key = { topicIdentity(it.url) }) { MessageSummaryRow(it, page?.url?.let { it.contains("action=sendbox") || it.contains("action=scout") } == true, actions.open) }
-                else items(topics, key = { topicIdentity(it.url) }) { MessageRow(it, actions.open) }
+                if (messages.isNotEmpty()) items(messages, key = { topicIdentity(it.url) }) { MessageSummaryRow(it, page?.url?.let { it.contains("action=sendbox") || it.contains("action=scout") } == true, actions.open, Modifier.animateItem()) }
+                else items(topics, key = { topicIdentity(it.url) }) { MessageRow(it, actions.open, Modifier.animateItem()) }
             }
         } else {
             if (page?.url?.contains("action=favor") == true && page.nativePage?.forms?.isNotEmpty() == true) item {
@@ -393,7 +460,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
             }
             val nativeTable = page?.nativePage?.tables?.firstOrNull { it.style == NativeTableStyle.GRID && it.rows.size > 1 }
             if (topics.isEmpty() && nativeTable != null) item { SiteTableCard(nativeTable, actions.open) }
-            else items(topics, key = { topicIdentity(it.url) }) { TopicCard(it, actions.open) }
+            else items(topics, key = { topicIdentity(it.url) }) { TopicCard(it, actions.open, modifier = Modifier.animateItem()) }
         }
         if (!managing && page != null) item("next") { NextPageFooter(c, page, timeline) }
         if (isMessages && page?.nativePage != null && rich != null) item { TaskPageExtras(c, page.nativePage, actions, rich) }
@@ -423,12 +490,13 @@ private fun MessageTabs(url: String, managing: Boolean, actions: KfActions, onMa
 }
 
 @Composable
-private fun MessageRow(link: SiteLink, onClick: (String) -> Unit) {
-    Surface(Modifier.fillMaxWidth().clickable { onClick(link.url) }, shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow, border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
-        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.MailOutline, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-            Column(Modifier.weight(1f).padding(start = 10.dp)) {
+private fun MessageRow(link: SiteLink, onClick: (String) -> Unit, modifier: Modifier = Modifier) {
+    KfCard(onClick = { onClick(link.url) }, modifier = modifier, contentPadding = PaddingValues(horizontal = KfSpacing.Lg, vertical = KfSpacing.Md)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(36.dp)) {
+                Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.MailOutline, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary) }
+            }
+            Column(Modifier.weight(1f).padding(start = KfSpacing.Md)) {
                 Text(link.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val parts = link.subtitle.split(" · ").filter { it.isNotBlank() }
                 if (parts.isNotEmpty()) Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -443,56 +511,61 @@ private fun MessageRow(link: SiteLink, onClick: (String) -> Unit) {
 }
 
 @Composable
-fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAvatar: ForumImage, richContent: RichContent) {
+fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAvatar: ForumImage, richContent: RichContent, showTitle: Boolean = true) {
     val page = page ?: return
     val state = rememberLazyListState()
+    val nativeActions = remember(page) { page.nativePage?.forms.orEmpty().filter { it.id.startsWith("rpc:") } }
     val timeline = ListInteractions(c, state, page, anchorKeyAt = { index ->
-        when (index) {
-            0 -> "title"
-            else -> c.timelineFor(page).posts.getOrNull(index - 1)?.id ?: "footer"
-        }
+        val titleOffset = if (showTitle) 1 else 0
+        if (showTitle && index == 0) "title"
+        else c.timelineFor(page).posts.getOrNull(index - titleOffset)?.id ?: "footer"
     })
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 6.dp, 16.dp, 110.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item {
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.FabBottom), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (showTitle) item {
             SelectionContainer { Text(page.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
         }
         items(timeline?.posts ?: page.posts, key = { it.id }) { post ->
-            Column(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().animateItem()) {
                 Column(Modifier.padding(horizontal = 2.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val avatar = post.avatar.ifBlank { c.avatarFor(post.authorUrl).orEmpty() }
                         LaunchedEffect(post.authorUrl) { c.loadAvatar(post.authorUrl) }
-                        Surface(Modifier.size(48.dp).clickable(enabled = post.authorUrl.isNotEmpty()) { actions.open(post.authorUrl) }, shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+                        Surface(Modifier.size(44.dp).clickable(enabled = post.authorUrl.isNotEmpty()) { actions.open(post.authorUrl) }, shape = CircleShape,
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
                             Box(contentAlignment = Alignment.Center) {
-                                Text(post.author.take(1), fontWeight = FontWeight.Bold)
-                                if (avatar.isNotBlank()) forumAvatar(avatar, post.author.take(1), Modifier.fillMaxSize())
+                                if (avatar.isBlank()) Text(post.author.take(1), fontWeight = FontWeight.Bold)
+                                else forumAvatar(avatar, post.author.take(1), Modifier.fillMaxSize())
                             }
                         }
-                        Column(Modifier.weight(1f).padding(start = 10.dp)) {
+                        Column(Modifier.weight(1f).padding(start = KfSpacing.Md)) {
                             Text(post.author, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(post.time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        Text(post.floor, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+                        if (post.floor.isNotBlank()) KfPill(post.floor, container = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer)
                         PostMenu(post, c, actions)
                     }
                     Spacer(Modifier.height(16.dp))
                     if (post.replies.isNotEmpty()) PostQuote(post, c, actions, richContent)
                     richContent(post.html, c.origin, c.fontScale, actions.open, c::showImages)
                     post.purchases.forEach { offer ->
-                        Surface(Modifier.fillMaxWidth().padding(top = 10.dp), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
-                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Lock, null, Modifier.size(18.dp))
-                                    Text("付费内容", Modifier.padding(start = 6.dp), fontWeight = FontWeight.Bold)
-                                }
-                                Text("${offer.price} ${offer.currency} · 购买后可见", style = MaterialTheme.typography.bodyMedium)
-                                if (offer.id in c.uncertainPurchases) {
-                                    Text("结果待确认，请先刷新核对。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                                    OutlinedButton(onClick = { c.load(offer.threadUrl, false) }, enabled = !c.busy) { Text("刷新核对") }
-                                } else {
-                                    Button(onClick = { c.requestPurchase(offer) }, enabled = !c.busy && !c.purchaseBusy) {
-                                        Icon(Icons.Default.ShoppingCart, null, Modifier.size(18.dp)); Text(" 购买 · ${offer.price} ${offer.currency}")
-                                    }
+                        KfCard(
+                            modifier = Modifier.padding(top = 10.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            border = null,
+                            contentPadding = PaddingValues(14.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Lock, null, Modifier.size(18.dp))
+                                Text("付费内容", Modifier.padding(start = 6.dp), fontWeight = FontWeight.Bold)
+                            }
+                            Text("${offer.price} ${offer.currency} · 购买后可见", Modifier.padding(top = KfSpacing.Sm), style = MaterialTheme.typography.bodyMedium)
+                            if (offer.id in c.uncertainPurchases) {
+                                Text("结果待确认，请先刷新核对。", Modifier.padding(top = KfSpacing.Sm), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                                OutlinedButton(onClick = { c.load(offer.threadUrl, false) }, enabled = !c.busy) { Text("刷新核对") }
+                            } else {
+                                Button(onClick = { c.requestPurchase(offer) }, enabled = !c.busy && !c.purchaseBusy, modifier = Modifier.padding(top = KfSpacing.Sm)) {
+                                    Icon(Icons.Default.ShoppingCart, null, Modifier.size(18.dp)); Text(" 购买 · ${offer.price} ${offer.currency}")
                                 }
                             }
                         }
@@ -500,11 +573,13 @@ fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAva
                     if (post.keywords.isNotEmpty() || post.meta.isNotEmpty()) {
                         Column(Modifier.padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (post.keywords.isNotEmpty()) PostInset("关键词", Icons.Default.Tag) {
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    post.keywords.forEachIndexed { index, keyword ->
-                                        if (index > 0) Text("·", color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
-                                        Text(keyword.title, Modifier.clickable { actions.open(keyword.url) }.padding(vertical = 2.dp),
-                                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    post.keywords.forEach { keyword ->
+                                        SuggestionChip(
+                                            onClick = { actions.open(keyword.url) },
+                                            label = { Text(keyword.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                            shape = KfPillShape,
+                                        )
                                     }
                                 }
                             }
@@ -519,6 +594,10 @@ fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAva
                 HorizontalDivider(Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
             }
         }
+        if (nativeActions.isNotEmpty()) {
+            item("native-actions") { KfSectionTitle("页面操作", icon = Icons.Default.TouchApp) }
+            items(nativeActions, key = { it.id }) { form -> NativeFormCard(c, form) }
+        }
         item("next") { NextPageFooter(c, page, timeline) }
     }
 }
@@ -527,21 +606,21 @@ fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAva
 private fun PostQuote(post: ForumPost, c: AppController, actions: KfActions, richContent: RichContent) {
     Column(Modifier.fillMaxWidth().padding(bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         post.replies.forEach { reply ->
-            Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))) {
-                Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.FormatQuote, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                        Text("回复", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Box(Modifier.padding(top = 4.dp)) {
-                        richContent(reply.html, c.origin, c.fontScale, actions.open, c::showImages)
-                    }
-                    reply.targetUrl?.takeIf { it.isNotBlank() }?.let { target ->
-                        Text("查看原楼层", Modifier.padding(top = 4.dp).clickable { actions.open(target) },
-                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                    }
+            KfCard(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                contentPadding = PaddingValues(horizontal = KfSpacing.Md, vertical = KfSpacing.Sm),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.FormatQuote, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("引用", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Box(Modifier.padding(top = 4.dp)) {
+                    richContent(reply.html, c.origin, c.fontScale, actions.open, c::showImages)
+                }
+                reply.targetUrl?.takeIf { it.isNotBlank() }?.let { target ->
+                    Text("查看原楼层", Modifier.padding(top = 4.dp).clickable { actions.open(target) },
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -582,16 +661,16 @@ private fun PostMenu(post: ForumPost, c: AppController, actions: KfActions) {
 
 @Composable
 private fun PostInset(title: String, icon: ImageVector, content: @Composable ColumnScope.() -> Unit) {
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHighest,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                Text(title, Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Spacer(Modifier.height(6.dp))
-            content()
+    KfCard(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        contentPadding = PaddingValues(horizontal = KfSpacing.Md, vertical = KfSpacing.Sm),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(title, Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        Spacer(Modifier.height(6.dp))
+        content()
     }
 }
 
@@ -605,10 +684,15 @@ internal fun Pagination(page: PageData?, open: (String) -> Unit) {
 
 @Composable
 private fun EmptyState(loading: Boolean, text: String, onRetry: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        if (loading) CircularProgressIndicator(Modifier.size(32.dp)) else Icon(Icons.Default.Forum, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(if (loading) "正在连接绯月…" else text.ifBlank { "这里还没有可显示的内容" }, Modifier.padding(vertical = 16.dp), style = MaterialTheme.typography.bodyMedium)
-        if (!loading) TextButton(onClick = onRetry) { Text("重新加载") }
+    if (loading) {
+        KfSkeletonScreen(rows = 2)
+    } else {
+        KfEmptyState(
+            icon = Icons.Default.Forum,
+            title = text.ifBlank { "这里还没有可显示的内容" },
+            actionLabel = "重新加载",
+            onAction = onRetry,
+        )
     }
 }
 
@@ -618,39 +702,42 @@ fun LoginScreen(c: AppController, actions: KfActions) {
     var password by remember(c.origin) { mutableStateOf("") }
     var visible by remember { mutableStateOf(false) }
     var consent by remember(c.origin) { mutableStateOf(false) }
-    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xl, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
-            Icon(Icons.Default.NightsStay, null, Modifier.size(64.dp).padding(bottom = 12.dp), tint = MaterialTheme.colorScheme.primary)
-            Text("欢迎回来。", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-            Text("用熟悉的账号，继续未完的讨论。", Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.size(56.dp)) {
+                Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.NightsStay, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary) }
+            }
+            Text("欢迎回来。", Modifier.padding(top = KfSpacing.Lg), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("用熟悉的账号，继续未完的讨论。", Modifier.padding(top = KfSpacing.Sm), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Column(Modifier.fillMaxWidth().padding(16.dp)) {
-                    Text("即将登录的服务器", style = MaterialTheme.typography.labelMedium)
-                    Text(c.origin, Modifier.padding(vertical = 8.dp), fontWeight = FontWeight.Bold)
-                    Text("非官方代理。凭证只发给这个域名。", style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = actions.openSettings) { Text("选择其他域名") }
+            KfCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Dns, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text("即将登录的服务器", Modifier.padding(start = KfSpacing.Sm), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                Text(c.origin, Modifier.padding(top = KfSpacing.Sm), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("非官方代理。凭证只发给这个域名。", Modifier.padding(top = KfSpacing.Xs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = actions.openSettings, contentPadding = PaddingValues(horizontal = 0.dp, vertical = KfSpacing.Xs)) { Text("选择其他域名") }
             }
         }
-        item { OutlinedTextField(username, { username = it }, Modifier.fillMaxWidth(), label = { Text("用户名") }, leadingIcon = { Icon(Icons.Default.PersonOutline, null) }, singleLine = true, enabled = !c.busy, shape = RoundedCornerShape(16.dp)) }
+        item { OutlinedTextField(username, { username = it }, Modifier.fillMaxWidth(), label = { Text("用户名") }, leadingIcon = { Icon(Icons.Default.PersonOutline, null) }, singleLine = true, enabled = !c.busy, shape = KfFieldShape) }
         item { OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), label = { Text("密码") }, leadingIcon = { Icon(Icons.Default.LockOpen, null) }, singleLine = true, enabled = !c.busy,
             visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            trailingIcon = { IconButton(onClick = { visible = !visible }) { Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, "显示或隐藏密码") } }, shape = RoundedCornerShape(16.dp)) }
+            trailingIcon = { IconButton(onClick = { visible = !visible }) { Icon(if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility, "显示或隐藏密码") } }, shape = KfFieldShape) }
         item {
-            Row(Modifier.clickable { consent = !consent }, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.clickable { consent = !consent }.padding(vertical = KfSpacing.Xs), verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(consent, { consent = it }); Text("信任此域名并登录", style = MaterialTheme.typography.bodySmall)
             }
         }
-        item { Button(onClick = { val value = password; password = ""; c.login(username, value) }, Modifier.fillMaxWidth().height(54.dp), enabled = consent && !c.busy && username.isNotBlank() && password.isNotEmpty()) { Text(if (c.busy) "正在登录…" else "登录", style = MaterialTheme.typography.titleMedium) } }
+        item { Button(onClick = { val value = password; password = ""; c.login(username, value) }, Modifier.fillMaxWidth().height(52.dp), enabled = consent && !c.busy && username.isNotBlank() && password.isNotEmpty(), shape = KfFieldShape) { Text(if (c.busy) "正在登录…" else "登录", style = MaterialTheme.typography.titleMedium) } }
         item { Text("密码不会保存；会话加密存储在手机本地。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         item { Box {
             var more by remember { mutableStateOf(false) }
             TextButton(onClick = { more = true }) { Text("更多登录选项"); Icon(Icons.Default.ExpandMore, null, Modifier.size(18.dp)) }
             DropdownMenu(more, { more = false }) {
                 DropdownMenuItem(text = { Text("登录选项 / 验证码") }, leadingIcon = { Icon(Icons.Default.VerifiedUser, null) }, onClick = { more = false; actions.openNative("login.php") })
-                DropdownMenuItem(text = { Text("注册账号") }, leadingIcon = { Icon(Icons.Default.PersonAdd, null) }, onClick = { more = false; c.openExternal("${c.origin}/register.php") })
+                DropdownMenuItem(text = { Text("注册账号") }, leadingIcon = { Icon(Icons.Default.PersonAdd, null) }, onClick = { more = false; actions.open("register.php") })
             }
         } }
     }
@@ -659,12 +746,15 @@ fun LoginScreen(c: AppController, actions: KfActions) {
 @Composable
 fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage, onLogout: () -> Unit) {
     var section by rememberSaveable { mutableStateOf("入口") }
+    var showSkins by rememberSaveable { mutableStateOf(false) }
     val savedSections = rememberSaveableStateHolder()
     savedSections.SaveableStateProvider(section) {
     val state = rememberLazyListState()
     val timeline = ListInteractions(c, state, if (section == "书签") c.siteFavorites else null, HomeTab.ACCOUNT)
     val profile = c.accountProfile
     val initial = c.home?.username?.take(1).orEmpty().ifBlank { "月" }
+    val sessionPending = c.home == null && (c.busy || (c.error == null && c.page == null))
+    val sessionUnavailable = c.home == null && !c.busy && (c.error != null || c.page != null)
     val stats = profile?.stats.orEmpty()
     val menuLinks = c.home?.menu.orEmpty()
         .filterNot {
@@ -679,32 +769,70 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
         if (section == "书签" && c.authenticated) c.loadFavorites()
     }
     RefreshableList(timeline, { c.siteFavorites?.let(c::refreshTimeline) ?: c.loadFavorites(true) }, enabled = section == "书签" && c.authenticated) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            KfCard(modifier = Modifier.animateContentSize(), color = MaterialTheme.colorScheme.primaryContainer,
+                border = null, contentPadding = PaddingValues(0.dp)) {
                 Column(Modifier.fillMaxWidth()) {
                     Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Surface(Modifier.size(64.dp), shape = CircleShape, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)) {
+                        Surface(Modifier.size(64.dp), shape = CircleShape, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f))) {
                             Box(contentAlignment = Alignment.Center) {
-                                Text(initial, style = MaterialTheme.typography.headlineMedium)
-                                if (!c.accountAvatar.isNullOrBlank()) forumAvatar(c.accountAvatar.orEmpty(), "", Modifier.fillMaxSize())
+                                when {
+                                    sessionPending -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    c.accountAvatar.isNullOrBlank() -> Text(initial, style = MaterialTheme.typography.headlineMedium)
+                                    else -> forumAvatar(c.accountAvatar.orEmpty(), initial, Modifier.fillMaxSize())
+                                }
                             }
                         }
                         Column(Modifier.weight(1f).padding(start = 16.dp)) {
-                            Text(c.home?.username.orEmpty().ifBlank { "尚未登录" }, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                when {
+                                    sessionPending -> "正在读取账号…"
+                                    sessionUnavailable -> "账号状态未读取"
+                                    c.home?.username.isNullOrBlank() -> "尚未登录"
+                                    else -> c.home?.username.orEmpty()
+                                },
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             Text(profile?.headline?.value ?: c.origin.removePrefix("https://"), style = MaterialTheme.typography.bodySmall)
-                            Text(if (c.authenticated) "会话已验证" else "登录后访问更多内容", Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelMedium)
+                            Text(
+                                when {
+                                    sessionPending -> "正在验证会话…"
+                                    sessionUnavailable -> c.error ?: "请检查网络后重试"
+                                    c.authenticated -> "会话已验证"
+                                    else -> "登录后访问更多内容"
+                                },
+                                Modifier.padding(top = 4.dp),
+                                style = MaterialTheme.typography.labelMedium,
+                            )
                         }
                         Button(
-                            onClick = { if (c.authenticated) c.claimDailyReward() else actions.openLogin() },
-                            enabled = if (c.authenticated) !c.dailyBusy && !c.dailySigned else true,
+                            onClick = {
+                                when {
+                                    sessionUnavailable -> c.ensurePage("index.php", force = true)
+                                    c.authenticated -> c.claimDailyReward()
+                                    else -> actions.openLogin()
+                                }
+                            },
+                            enabled = when {
+                                sessionPending -> false
+                                sessionUnavailable -> !c.busy
+                                c.authenticated -> !c.dailyBusy && !c.dailySigned
+                                else -> true
+                            },
                             modifier = Modifier.widthIn(min = 100.dp).heightIn(min = 58.dp),
-                            shape = RoundedCornerShape(18.dp),
+                            shape = KfFieldShape,
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         ) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
                                     when {
+                                        sessionPending -> "读取中…"
+                                        sessionUnavailable -> "重试"
                                         c.dailyBusy -> "签到中…"
                                         !c.authenticated -> "登录"
                                         c.dailySigned -> "已签到"
@@ -715,6 +843,8 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                                 )
                                 Text(
                                     when {
+                                        sessionPending -> "请稍候"
+                                        sessionUnavailable -> "读取账号"
                                         c.dailySigned -> "明天再来"
                                         c.authenticated -> "领 KFB"
                                         else -> "进入账号"
@@ -726,8 +856,9 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                     }
                     if (stats.isNotEmpty()) {
                         HorizontalDivider(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
-                        Row(Modifier.fillMaxWidth().padding(vertical = 13.dp)) {
-                            stats.forEach { info ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                            stats.forEachIndexed { index, info ->
+                                if (index > 0) VerticalDivider(Modifier.height(26.dp), color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f))
                                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                                     Text(info.value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     Text(info.label, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f))
@@ -745,48 +876,71 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
         } }
         when (section) {
             "书签" -> {
-                if (!c.authenticated) {
-                    item { Text("登录后查看站点收藏夹", Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    item { Button(onClick = actions.openLogin, Modifier.fillMaxWidth()) { Text("登录账号") } }
-                } else {
-                    val favorites = c.siteFavorites
-                    item {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("收藏 · ${timeline?.topics?.size ?: favorites?.topics?.size ?: 0} 条", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                when {
+                    sessionPending -> item { KfSkeletonScreen(rows = 2) }
+                    sessionUnavailable -> item {
+                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.error.orEmpty(), actionLabel = "重试",
+                            onAction = { c.ensurePage("index.php", force = true) })
+                    }
+                    !c.authenticated -> item {
+                        KfEmptyState(Icons.Default.BookmarkBorder, "登录后查看站点收藏夹", actionLabel = "登录账号", onAction = actions.openLogin)
+                    }
+                    else -> {
+                        val favorites = c.siteFavorites
+                        item {
+                            Text("收藏 · ${timeline?.topics?.size ?: favorites?.topics?.size ?: 0} 条", Modifier.padding(top = KfSpacing.Sm), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                    }
-                    if (c.favoritesBusy && favorites == null) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
-                    c.favoritesError?.let { message -> item {
-                        Text(message, Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = { c.loadFavorites(force = true) }) { Text("重试") }
-                    } }
-                    if (favorites != null && favorites.topics.isEmpty() && !c.favoritesBusy) {
-                        item { Text("还没有收藏过帖子。阅读时点“收藏本帖”即可加入站点收藏夹。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    }
-                    items(timeline?.topics ?: favorites?.topics.orEmpty(), key = { topicIdentity(it.url) }) { TopicCard(it, actions.open) }
-                    if (favorites != null) item("next") { NextPageFooter(c, favorites, timeline) }
-                    item {
-                        OutlinedButton(onClick = { actions.open(favorites?.url ?: "profile.php?action=favor") }, Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Bookmarks, null, Modifier.size(18.dp))
-                            Text(" 管理收藏与分类")
+                        if (c.favoritesBusy && favorites == null) item { KfSkeletonScreen(rows = 2) }
+                        c.favoritesError?.let { message -> item {
+                            KfEmptyState(Icons.Default.CloudOff, message, actionLabel = "重试", onAction = { c.loadFavorites(force = true) })
+                        } }
+                        if (favorites != null && favorites.topics.isEmpty() && !c.favoritesBusy) {
+                            item { KfEmptyState(Icons.Default.BookmarkBorder, "还没有收藏过帖子", "阅读时点“收藏本帖”即可加入站点收藏夹。") }
+                        }
+                        items(timeline?.topics ?: favorites?.topics.orEmpty(), key = { topicIdentity(it.url) }) { topic ->
+                            TopicCard(topic, actions.open, modifier = Modifier.animateItem())
+                        }
+                        if (favorites != null) item("next") { NextPageFooter(c, favorites, timeline) }
+                        item {
+                            OutlinedButton(onClick = { actions.open(favorites?.url ?: "profile.php?action=favor") }, Modifier.fillMaxWidth(), shape = KfFieldShape) {
+                                Icon(Icons.Default.Bookmarks, null, Modifier.size(18.dp))
+                                Text(" 管理收藏与分类")
+                            }
                         }
                     }
                 }
             }
             "历史" -> {
                 item { Row(verticalAlignment = Alignment.CenterVertically) { Text("最近阅读 · 仅保存在本机", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium); TextButton(onClick = c::clearHistory) { Text("清空") } } }
-                items(c.history, key = { it.url }) { TopicCard(it, actions.open) }
+                if (c.history.isEmpty()) item { KfEmptyState(Icons.Default.History, "还没有阅读记录", "打开过的主题会显示在这里，仅保存在本机。") }
+                items(c.history, key = { it.url }) { topic -> TopicCard(topic, actions.open, modifier = Modifier.animateItem()) }
             }
             else -> {
-                if (!c.authenticated) item { Button(onClick = actions.openLogin, Modifier.fillMaxWidth()) { Text("登录账号") } }
+                when {
+                    sessionPending -> item { KfSkeletonScreen(rows = 2) }
+                    sessionUnavailable -> item {
+                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.error.orEmpty(), actionLabel = "重试",
+                            onAction = { c.ensurePage("index.php", force = true) })
+                    }
+                    !c.authenticated -> item { Button(onClick = actions.openLogin, Modifier.fillMaxWidth(), shape = KfFieldShape) { Text("登录账号") } }
+                }
                 if (menuLinks.isNotEmpty()) {
-                    item { SectionTitle("我的站点", Icons.Default.Dashboard) }
+                    item { KfSectionTitle("我的站点", icon = Icons.Default.Dashboard) }
                     items(menuLinks, key = { it.url }) { link ->
                         ListItem(headlineContent = { Text(link.title) }, supportingContent = { Text(accountSubtitle(link.url)) },
                             leadingContent = { Icon(siteIcon(link.url), null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { actions.open(link.url) })
                     }
                 }
-                item { SectionTitle("客户端", Icons.Default.Tune) }
+                val homeSkins = c.home?.homeSkins.orEmpty()
+                if (c.authenticated && homeSkins.isNotEmpty()) item {
+                    ListItem(
+                        headlineContent = { Text("站点背景") },
+                        supportingContent = { Text(homeSkins.firstOrNull { it.selected }?.title ?: "选择网页首页背景") },
+                        leadingContent = { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable { showSkins = true },
+                    )
+                }
+                item { KfSectionTitle("客户端", icon = Icons.Default.PhoneAndroid) }
                 item { ListItem(headlineContent = { Text("偏好与连接") }, supportingContent = { Text("主题、字号与服务器") }, leadingContent = { Icon(Icons.Default.Tune, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { actions.openSettings() }) }
                 if (c.authenticated) item { ListItem(headlineContent = { Text("清除本机登录") }, leadingContent = { Icon(Icons.AutoMirrored.Filled.ExitToApp, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable(onClick = onLogout)) }
                 c.home?.serverLogout?.takeIf { c.authenticated }?.let { destination -> item {
@@ -797,6 +951,32 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
         }
     }
     }
+    }
+    val skins = c.home?.homeSkins.orEmpty()
+    if (showSkins && skins.isNotEmpty()) ModalBottomSheet(onDismissRequest = { showSkins = false }) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text("站点背景", Modifier.padding(horizontal = 24.dp, vertical = 12.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("选择会提交到站点并改变网页首页背景；客户端主题不受影响。", Modifier.padding(horizontal = 24.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LazyColumn(Modifier.heightIn(max = 440.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
+                items(skins, key = { it.id }) { skin ->
+                    ListItem(
+                        headlineContent = { Text(skin.title) },
+                        supportingContent = { Text(if (skin.selected) "当前背景" else "点按更换") },
+                        leadingContent = {
+                            Surface(Modifier.size(72.dp, 46.dp), shape = KfTileShape, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                                if (skin.thumbnailUrl.isNotBlank()) forumAvatar(skin.thumbnailUrl, "背", Modifier.fillMaxSize())
+                                else Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Wallpaper, null) }
+                            }
+                        },
+                        trailingContent = { if (skin.selected) Icon(Icons.Default.Check, "当前背景", tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable(enabled = !c.siteBusy) {
+                            showSkins = false
+                            c.openSiteDestination(c.resolve(skin.url, if (skin.id == "999") "恢复默认站点背景" else "更换站点背景"))
+                        },
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -822,8 +1002,8 @@ fun SettingsScreen(c: AppController) {
     var invalid by remember { mutableStateOf<String?>(null) }
     var advanced by rememberSaveable { mutableStateOf(false) }
     var servers by remember { mutableStateOf(false) }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { SectionTitle("外观", Icons.Default.Palette) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item { KfSectionTitle("外观", icon = Icons.Default.Palette) }
         items(ThemeMode.entries, key = { it.name }) { mode ->
             ListItem(headlineContent = { Text(mode.title) }, leadingContent = { RadioButton(c.theme == mode, null) },
                 modifier = Modifier.clickable { c.updateTheme(mode) })
@@ -833,7 +1013,7 @@ fun SettingsScreen(c: AppController) {
             Slider(value = c.fontScale, onValueChange = c::updateFontScale, valueRange = 0.85f..1.4f, steps = 10)
         }
         item { HorizontalDivider() }
-        item { SectionTitle("连接", Icons.Default.Public) }
+        item { KfSectionTitle("连接", icon = Icons.Default.Public) }
         item {
             ListItem(headlineContent = { Text("当前服务器") }, supportingContent = { Text(c.origin) },
                 trailingContent = { Icon(Icons.Default.ChevronRight, null) }, modifier = Modifier.clickable { servers = true })
@@ -845,13 +1025,21 @@ fun SettingsScreen(c: AppController) {
                 trailingContent = { Icon(if (advanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore, "展开或收起高级设置") },
                 modifier = Modifier.clickable { advanced = !advanced })
         }
-        if (advanced) {
-            item { ListItem(headlineContent = { Text("配置来源：${c.catalog.source.label}") }, supportingContent = { Text(c.catalog.warning ?: "在线配置不可用时，自动使用最近缓存或内置列表。") }) }
-            item { OutlinedTextField(remote, { remote = it }, Modifier.fillMaxWidth(), label = { Text("GitHub Raw JSON 配置 URL") }, supportingText = { Text("留空使用内置列表") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)) }
-            item { FilledTonalButton(onClick = { c.refreshCatalog(remote) }) { Text("更新在线配置") } }
-            item { OutlinedTextField(custom, { custom = it; invalid = null }, Modifier.fillMaxWidth(), label = { Text("自定义 HTTPS 域名") }, placeholder = { Text("https://example.com") }, isError = invalid != null, supportingText = { Text(invalid ?: "只使用你信任的域名") }, singleLine = true) }
-            item { OutlinedButton(onClick = { try { pending = normalizeOrigin(custom) } catch (e: Exception) { invalid = e.message } }) { Text("使用自定义服务器") } }
-            item { Text("备用节点未逐一验证。切换服务器后，登录凭据只发送到选中的域名。", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item {
+            AnimatedVisibility(
+                visible = advanced,
+                enter = expandVertically(tween(KfMotionSpec.Standard)) + fadeIn(tween(KfMotionSpec.Quick)),
+                exit = shrinkVertically(tween(KfMotionSpec.Quick)) + fadeOut(tween(KfMotionSpec.Quick)),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ListItem(headlineContent = { Text("配置来源：${c.catalog.source.label}") }, supportingContent = { Text(c.catalog.warning ?: "在线配置不可用时，自动使用最近缓存或内置列表。") })
+                    OutlinedTextField(remote, { remote = it }, Modifier.fillMaxWidth(), label = { Text("GitHub Raw JSON 配置 URL") }, supportingText = { Text("留空使用内置列表") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), shape = KfFieldShape)
+                    FilledTonalButton(onClick = { c.refreshCatalog(remote) }) { Text("更新在线配置") }
+                    OutlinedTextField(custom, { custom = it; invalid = null }, Modifier.fillMaxWidth(), label = { Text("自定义 HTTPS 域名") }, placeholder = { Text("https://example.com") }, isError = invalid != null, supportingText = { Text(invalid ?: "只使用你信任的域名") }, singleLine = true, shape = KfFieldShape)
+                    OutlinedButton(onClick = { try { pending = normalizeOrigin(custom) } catch (e: Exception) { invalid = e.message } }, shape = KfFieldShape) { Text("使用自定义服务器") }
+                    Text("备用节点未逐一验证。切换服务器后，登录凭据只发送到选中的域名。", Modifier.padding(vertical = KfSpacing.Xs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
     if (servers) ModalBottomSheet(onDismissRequest = { servers = false }) {
@@ -871,14 +1059,6 @@ fun SettingsScreen(c: AppController) {
             text = { Text("目标：$target\n将使用该域名自己的登录状态。") },
             confirmButton = { TextButton(onClick = { pending = null; c.switchDomain(target) }) { Text("切换") } },
             dismissButton = { TextButton(onClick = { pending = null }) { Text("取消") } })
-    }
-}
-
-@Composable
-private fun SectionTitle(title: String, icon: ImageVector) {
-    Row(Modifier.padding(top = 16.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-        Text(title, Modifier.padding(start = 10.dp), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -903,9 +1083,9 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
             focusBody = false
         }
     }
-    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (form.recipientField != null) item { OutlinedTextField(c.draftRecipient, { c.updateDraftRecipient(it) }, Modifier.fillMaxWidth(),
-            label = { Text("收件人") }, singleLine = true, enabled = !c.busy,
+            label = { Text("收件人") }, singleLine = true, enabled = !c.busy, shape = KfFieldShape,
             supportingText = { Text("站点按用户名查找；请确认没有同名或相似昵称。客户端不会声称已绑定了某个 UID。") }) }
         if (c.draftRestored) item {
             Text("已恢复上次编辑的草稿。", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
@@ -915,43 +1095,50 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
         } }
         if (form.categories.isNotEmpty()) item {
             Box {
-                OutlinedButton(onClick = { categories = true }, Modifier.fillMaxWidth(), enabled = !c.busy) { Text(form.categories.firstOrNull { it.value == c.draftCategory }?.label ?: "选择分类"); Icon(Icons.Default.ExpandMore, null) }
+                OutlinedButton(onClick = { categories = true }, Modifier.fillMaxWidth(), enabled = !c.busy, shape = KfFieldShape) { Text(form.categories.firstOrNull { it.value == c.draftCategory }?.label ?: "选择分类"); Icon(Icons.Default.ExpandMore, null) }
                 DropdownMenu(categories, { categories = false }) { form.categories.forEach { option -> DropdownMenuItem(text = { Text(option.label) }, onClick = { c.updateDraftCategory(option.value); categories = false }) } }
             }
         }
-        item { OutlinedTextField(c.draftTitle, { c.updateDraftTitle(it) }, Modifier.fillMaxWidth(), label = { Text("标题") }, enabled = !c.busy, shape = RoundedCornerShape(16.dp)) }
+        item { OutlinedTextField(c.draftTitle, { c.updateDraftTitle(it) }, Modifier.fillMaxWidth(), label = { Text("标题") }, enabled = !c.busy, shape = KfFieldShape) }
         item {
             Column {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-                    listOf(
-                        Triple(Icons.Default.FormatBold, "粗体", "[b]" to "[/b]"),
-                        Triple(Icons.Default.FormatQuote, "引用", "[quote]" to "[/quote]"),
-                        Triple(Icons.Default.Link, "链接", "[url=https://]" to "[/url]"),
-                        Triple(Icons.Default.Image, "图片", "[img]" to "[/img]"),
-                    ).forEach { (icon, label, tags) ->
-                        IconButton(onClick = { applyInsertion(wrapEditorSelection(body.text, body.selection.start, body.selection.end, tags.first, tags.second)) }, enabled = !c.busy) { Icon(icon, label) }
+                Surface(shape = KfTileShape, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = KfSpacing.Xs), verticalAlignment = Alignment.CenterVertically) {
+                        listOf(
+                            Triple(Icons.Default.FormatBold, "粗体", "[b]" to "[/b]"),
+                            Triple(Icons.Default.FormatQuote, "引用", "[quote]" to "[/quote]"),
+                            Triple(Icons.Default.Link, "链接", "[url=https://]" to "[/url]"),
+                            Triple(Icons.Default.Image, "图片", "[img]" to "[/img]"),
+                        ).forEach { (icon, label, tags) ->
+                            IconButton(onClick = { applyInsertion(wrapEditorSelection(body.text, body.selection.start, body.selection.end, tags.first, tags.second)) }, enabled = !c.busy) { Icon(icon, label) }
+                        }
+                        IconButton(onClick = { focusBody = true; focusManager.clearFocus(); keyboard?.hide(); c.showEmoticonPicker = true }, enabled = !c.busy) { Icon(Icons.Default.InsertEmoticon, "表情") }
                     }
-                    IconButton(onClick = { focusBody = true; focusManager.clearFocus(); keyboard?.hide(); c.showEmoticonPicker = true }, enabled = !c.busy) { Icon(Icons.Default.InsertEmoticon, "表情") }
-                    if (form.uploadEnabled) IconButton(onClick = { c.requestFiles("editor") }, enabled = !c.busy) { Icon(Icons.Default.AttachFile, "附件") }
                 }
-                TextField(body, { body = it; c.updateDraftContent(it.text) }, Modifier.fillMaxWidth().heightIn(min = 250.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
-                    colors = TextFieldDefaults.colors(focusedContainerColor = MaterialTheme.colorScheme.background, unfocusedContainerColor = MaterialTheme.colorScheme.background))
+                TextField(body, { body = it; c.updateDraftContent(it.text) }, Modifier.fillMaxWidth().padding(top = KfSpacing.Sm).heightIn(min = 250.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
+                    shape = KfFieldShape,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                        unfocusedIndicatorColor = MaterialTheme.colorScheme.outlineVariant,
+                    ))
             }
         }
-        if ("diy_guanjianci" in form.fields) item { OutlinedTextField(c.draftKeywords, { c.updateDraftKeywords(it) }, Modifier.fillMaxWidth(), label = { Text("关键词 / @用户") }, supportingText = { Text("按站点规则使用英文逗号分隔，最多 5 个。正文里的 @用户名 会在发送时合并到这里。") }, enabled = !c.busy) }
+        if ("diy_guanjianci" in form.fields) item { OutlinedTextField(c.draftKeywords, { c.updateDraftKeywords(it) }, Modifier.fillMaxWidth(), label = { Text("关键词 / @用户") }, supportingText = { Text("按站点规则使用英文逗号分隔，最多 5 个。正文里的 @用户名 会在发送时合并到这里。") }, enabled = !c.busy, shape = KfFieldShape) }
         item { Text("草稿会加密保存在本机，重启后可恢复；附件需要重新选择。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (form.uploadEnabled) item {
-            OutlinedButton(onClick = { c.requestFiles("editor") }, Modifier.fillMaxWidth(), enabled = !c.busy) { Icon(Icons.Default.AttachFile, null); Text(" 选择附件（最多 ${form.uploadLimit} 个）") }
+            OutlinedButton(onClick = { c.requestFiles("editor") }, Modifier.fillMaxWidth(), enabled = !c.busy, shape = KfFieldShape) { Icon(Icons.Default.AttachFile, null); Text(" 选择附件（最多 ${form.uploadLimit} 个）") }
             Text("每个不超过 ${form.uploadMaxBytes / 1024} KB，最多 ${form.uploadLimit} 个。", style = MaterialTheme.typography.bodySmall)
         }
         items(c.editorFiles, key = { it.id }) { file ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().animateItem(), verticalAlignment = Alignment.CenterVertically) {
                 Text(file.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { applyInsertion(insertEditorText(body.text, body.selection.start, body.selection.end, " [upload=${file.slot}] ")) }, enabled = !c.busy) { Text("插入") }
                 IconButton(onClick = { c.removeEditorFile(file.id) }, enabled = !c.busy) { Icon(Icons.Default.Close, "删除附件") }
             }
         }
-        if (c.submitUncertain) item { OutlinedButton(onClick = c::checkEditorSubmission, Modifier.fillMaxWidth()) { Text("检查发件箱 / 核对站点结果") } }
+        if (c.submitUncertain) item { OutlinedButton(onClick = c::checkEditorSubmission, Modifier.fillMaxWidth(), shape = KfFieldShape) { Text("检查发件箱 / 核对站点结果") } }
     }
     if (showEmoticons) ModalBottomSheet(onDismissRequest = { c.showEmoticonPicker = false; focusBody = true }) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
