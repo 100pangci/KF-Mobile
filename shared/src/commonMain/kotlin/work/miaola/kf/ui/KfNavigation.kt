@@ -1,6 +1,7 @@
 package work.miaola.kf.ui
 
 import work.miaola.kf.HomeTab
+import work.miaola.kf.PageData
 
 /**
  * App-level destinations. The Android shell maps each value to a Navigation
@@ -95,6 +96,23 @@ object KfDestinations {
             path == "login.php" -> KfDestinationKind.LOGIN
             else -> KfDestinationKind.NATIVE
         }
+    }
+
+    /**
+     * The single "NativeSiteScreen owns this page" predicate. Both shells use
+     * it instead of re-deriving path/query rules of their own.
+     */
+    fun isNativePage(page: PageData?): Boolean = when (page?.url?.let(::fromUrl)) {
+        KfDestinationKind.NATIVE, KfDestinationKind.PROFILE, KfDestinationKind.MESSAGE -> true
+        else -> false
+    }
+
+    /** Pushed pages hide the bottom bar; top-level tabs keep it. */
+    fun isDetailDestination(url: String): Boolean = when (fromUrl(url)) {
+        KfDestinationKind.LISTING, KfDestinationKind.READER, KfDestinationKind.SEARCH,
+        KfDestinationKind.MESSAGE, KfDestinationKind.PROFILE, KfDestinationKind.NATIVE,
+        KfDestinationKind.GUGU -> true
+        else -> false
     }
 }
 

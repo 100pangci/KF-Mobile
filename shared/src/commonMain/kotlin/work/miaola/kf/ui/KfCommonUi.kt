@@ -190,6 +190,11 @@ fun KfGlobalDialogs(c: AppController, logout: Boolean = false, onLogoutChange: (
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(if (link?.effect == SiteEffect.EXTERNAL) "将由外部应用打开链接，不附加论坛 Cookie。" else form?.form?.warning ?: link?.explanation?.ifBlank { "请确认此次操作；可能影响站点状态或余额。" }.orEmpty())
+                    if (link?.effect == SiteEffect.EXTERNAL) {
+                        // Link text comes from page content; show the real target host.
+                        Text("目标：${link.url.substringAfter("://").substringBefore('/').substringBefore('?')}",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
                     Text("服务器：${c.origin}", style = MaterialTheme.typography.bodySmall)
                     form?.let { submission ->
                         submission.form.fields.filter { it.name in listOf("pwuser", "to_money", "drawmoney", "btype", "action", "job") && it.kind != SiteFieldKind.PASSWORD }.forEach { field ->

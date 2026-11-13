@@ -75,7 +75,8 @@ data class PendingBatch(
  */
 class RecoveryStore(private val store: KeyValueStore, private val origin: String) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false }
-    private val stateKey = "recovery_v1@$origin"
+    private val stateKey = "recovery_v1@" + origin
+    private val draftIndexKey = "editor_drafts_v1@" + origin
 
     fun loadDraft(sourceUrl: String, now: Long = currentEpochMillis()): EditorDraft? {
         val raw = store.get(draftKey(sourceUrl)) ?: return null
@@ -104,10 +105,41 @@ class RecoveryStore(private val store: KeyValueStore, private val origin: String
             attachments = draft.attachments.take(10),
             updatedAt = if (draft.updatedAt > 0) draft.updatedAt else currentEpochMillis(),
         )
-        store.put(draftKey(draft.sourceUrl), json.encodeToString(bounded))
+        val key = draftKey(draft.sourceUrl)
+        store.put(key, json.encodeToString(bounded))
+        indexDraft(key, present = true)
     }
 
-    fun removeDraft(sourceUrl: String) = store.remove(draftKey(sourceUrl))
+    fun removeDraft(sourceUrl: String) {
+        val key = draftKey(sourceUrl)
+        store.remove(key)
+        indexDraft(key, present = false)
+    }
+
+    /** Drafts are keyed by origin only, so logout must remove them explicitly. */
+    fun clearDrafts() {
+        loadDraftIndex().forEach(store::remove)
+        store.remove(draftIndexKey)
+    }
+
+    /**
+     * Remove everything tied to the signed-in user: drafts, destination and
+     * timeline anchors. Pending mutation receipts stay durable for readback.
+     */
+    fun clearUserData() {
+        clearDrafts()
+        clearState()
+    }
+
+    private fun loadDraftIndex(): Set<String> =
+        runCatching { json.decodeFromString<Set<String>>(store.get(draftIndexKey) ?: "[]") }.getOrDefault(emptySet())
+
+    private fun indexDraft(key: String, present: Boolean) {
+        val existing = loadDraftIndex()
+        val updated = if (present) existing + key else existing - key
+        if (updated.isEmpty()) store.remove(draftIndexKey)
+        else store.put(draftIndexKey, json.encodeToString(updated))
+    }
 
     fun loadState(): RecoveryState? {
         val raw = store.get(stateKey) ?: return null
@@ -121,7 +153,8 @@ class RecoveryStore(private val store: KeyValueStore, private val origin: String
     fun saveState(state: RecoveryState) {
         val bounded = state.copy(
             origin = origin,
-            timelines = state.timelines.entries.take(8).associate { (key, value) ->
+            // Keep the most recently read timelines, not the first inserted ones.
+            timelines = state.timelines.entries.sortedByDescending { it.value.updatedAt }.take(8).associate { (key, value) ->
                 key to value.copy(
                     loadedPageUrls = value.loadedPageUrls.take(MAX_RESTORED_PAGES),
                     anchorKey = value.anchorKey.take(160),
@@ -155,7 +188,17 @@ class RecoveryStore(private val store: KeyValueStore, private val origin: String
 
     private fun RecoveryState.validated(): RecoveryState {
         fun safe(url: String) = url.startsWith("$origin/") && !url.contains('\n') && url.length <= 2_048
-        val safeDestination = destination.takeIf { it.url.isBlank() || safe(it.url) } ?: DestinationRecovery()
+        // The destination may be a reward/rating entry carrying a session-issued
+        // safeid. It is reconstructable from the site, so never persist it.
+        fun tokenFree(url: String): Boolean {
+            val query = url.substringAfter('?', "").substringBefore('#')
+            if (query.isBlank()) return true
+            val sensitive = setOf("safeid", "verify", "ckcode", "pwpwd", "pwuser", "token")
+            return query.split('&').none { it.substringBefore('=').lowercase() in sensitive }
+        }
+        val safeDestination = destination.takeIf {
+            it.url.isBlank() || (safe(it.url) && tokenFree(it.url))
+        } ?: DestinationRecovery()
         return copy(
             destination = safeDestination,
             timelines = timelines.filterKeys(::safe).mapValues { (_, value) ->

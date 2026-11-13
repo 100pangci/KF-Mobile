@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import work.miaola.kf.AppController
+import work.miaola.kf.*
 
 fun searchCacheKey(keyword: String, author: String) = "search:${keyword.trim().length}:${keyword.trim()}|${author.trim()}"
 

@@ -17,6 +17,8 @@ jobs:
       - uses: android-actions/setup-android@v4
       - uses: gradle/actions/setup-gradle@v6
       - run: chmod +x gradlew
+      - name: Test packaging tools
+        run: python -m unittest tools/test_probe_login.py tools/test_package.py
       - run: ./gradlew :shared:desktopTest :androidApp:assembleDebug --stacktrace
       - uses: actions/upload-artifact@v7
         with:

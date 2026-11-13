@@ -1,5 +1,6 @@
 package work.miaola.kf
 
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jsoup.nodes.Document
@@ -20,36 +21,11 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         val source = sourceUrl.toHttpUrl()
         val path = source.pathSegments.lastOrNull().orEmpty()
         val action = source.queryParameter("action").orEmpty()
-        val mainOriginal = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") }
-            ?: doc.selectFirst("#main, #content, #alldiv") ?: doc.body()
+        val mainOriginal = mainColumn(doc) ?: doc.selectFirst("#main, #content, #alldiv") ?: doc.body()
         val main = mainOriginal.clone()
         main.select("script,style,.topmenuo,#kf_information,.rightboxa,#cnzz_stat_icon_1257832900").remove()
         main.select("img[src*=ys/top]").forEach { it.parent()?.remove() }
-        val title = when (path) {
-            "profile.php" -> when (action) { "modify" -> "修改资料"; "favor" -> "收藏管理"; else -> "会员资料" }
-            "message.php" -> when (action) { "read" -> "私信内容"; "readscout" -> "跟踪详情"; "banned" -> "屏蔽列表"; "scout" -> "消息跟踪"; "sendbox" -> "发件箱"; else -> "消息管理" }
-            "hack.php" -> when {
-                action == "log" -> "银行日志"
-                source.queryParameter("H_name") == "bank" -> "贡献与银行"
-                else -> "站点功能"
-            }
-            "kf_no1.php" -> "会员排行"
-            "kf_growup.php" -> "签到与成长"
-            "kf_fw_1wkfb.php" -> "评分与记录"
-            "kf_fw_ig_index.php" -> "争夺奖励"
-            "kf_fw_ig_mybp.php" -> "我的物品"
-            "kf_fw_ig_halo.php" -> "战力光环"
-            "kf_fw_ig_pklist.php" -> "争夺排行"
-            "kf_fw_ig_shop.php" -> "物品商店"
-            "kf_fw_ig_readme.php" -> "争夺帮助"
-            "kf_lv200.php" -> "进度分"
-            "fyg_sjcdwj.php" -> "咕咕镇"
-            "guanjianci.php" -> "被 @ 记录"
-            "faq.php" -> "帮助与规则"
-            "register.php" -> "注册账号"
-            "login.php" -> "账号登录"
-            else -> doc.title().substringBefore(" - ").trim().ifBlank { "站点功能" }
-        }
+        val title = pageTitle(doc, path, action, source)
         val forms = mainOriginal.select("form").filterNot { it.attr("action").startsWith("search.php") || it.attr("name") == "delatc" || it.attr("name") == "preview" }
             .mapIndexedNotNull { index, form -> parseForm(form, sourceUrl, "$path:$index", title) }
             .toMutableList()
@@ -117,6 +93,172 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
         work.select("form").unwrap()
         val unsupported = mutableListOf<String>()
         if (path == "fyg_sjcdwj.php") unsupported.add("咕咕镇使用独立游戏会话：角色、背包、战绩、商店、道具使用菜单、礼物、翻牌、许愿池、宝石工坊、属性分配、光环天赋、满级提升、单场骰子战争与改名的可见单步控件已原生接入并逐项确认；无法识别的控件保持只读")
+        val buttonLinks = buttonDestinations(work, path, action, sourceUrl, rewards, forms, unsupported)
+        if (profile != null) work.selectFirst("table.log1")?.remove()
+        if (path == "profile.php" && action == "modify") work.select("table.log1 tr").forEach { row ->
+            // Field widgets already have a dedicated editor; don't also discard
+            // new explanatory rows or unrelated tables introduced by the server.
+            if (row.select("input,textarea,select,button").isNotEmpty()) row.remove()
+        }
+        // Several feature pages (notably the 争夺 dashboard) display state with
+        // readonly inputs instead of text. Preserve those values before the
+        // generic input cleanup so the fallback does not silently lose them.
+        work.select("input[readonly], input[disabled]").forEach { input ->
+            if (input.attr("type").lowercase() == "hidden") return@forEach
+            val value = input.attr("value").trim()
+            if (value.isNotBlank()) input.replaceWith(Element("span").text(value))
+        }
+        work.select("input,textarea,select,button,iframe,object,embed").remove()
+        work.select("a[onclick],a[href^=javascript:]").forEach { it.remove() }
+        val (messageBody, message, messageActions) = extractMessageDetail(work, path, action, sourceUrl)
+        val extractedTables = mutableSetOf<Element>()
+        val blocks = buildBlocks(work, sourceUrl, extractedTables).map { block ->
+            if (block is NativeBlock.Table && path == "thread.php" &&
+                block.table.rows.firstOrNull()?.any { cell -> cell.link?.contains("post.php") == true } == true) {
+                val data = block.table.rows.drop(1)
+                val header = when (data.maxOfOrNull { row -> row.sumOf { it.colspan } }) {
+                    4 -> listOf(
+                        NativeCell("状态", bold = true), NativeCell("主题", bold = true),
+                        NativeCell("回复/查看", bold = true), NativeCell("最后发表", bold = true),
+                    )
+                    else -> emptyList()
+                }
+                block.copy(table = block.table.copy(rows = if (header.isEmpty()) data else listOf(header) + data, header = header.isNotEmpty()))
+            } else block
+        }.toMutableList()
+        if (!messageBody.isNullOrBlank()) {
+            val index = blocks.indexOfFirst { it is NativeBlock.Table }
+            blocks.add(if (index >= 0) index + 1 else 0, NativeBlock.Section("", messageBody.orEmpty()))
+        }
+        if (messageActions.isNotEmpty()) blocks.add(NativeBlock.Links(messageActions.distinctBy { it.url }))
+        val tables = blocks.filterIsInstance<NativeBlock.Table>().map { it.table }
+        val sections = blocks.filterIsInstance<NativeBlock.Section>().map { NativeSection(it.title, it.html) }
+        val links = mutableListOf<SiteDestination>()
+        val seen = mutableSetOf<String>()
+        fun addLink(link: SiteDestination?) {
+            if (link == null || link.url.isBlank() || !seen.add(link.url) || links.size >= 60) return
+            links.add(link)
+        }
+        profile?.links?.forEach(::addLink)
+        buttonLinks.forEach(::addLink)
+        work.select("a[href]").filter { a -> a.closest("table")?.let { it !in extractedTables } ?: true }.forEach { a ->
+            val href = a.attr("href")
+            val label = a.text().trim().ifBlank { a.attr("title") }.take(120)
+            if (label.isBlank() || href.startsWith('#') || href.startsWith("javascript:", true)) return@forEach
+            addLink(routes.classify(html.resolve(href, sourceUrl) ?: href, label))
+        }
+        val usefulLinks = links.filterNot { link ->
+            (path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php")) ||
+                link.url.toHttpUrlOrNull()?.let { it.encodedPath == "/kf_fw_1wkfb.php" && it.queryParameter("do") == "1" } == true ||
+                link.url.toHttpUrlOrNull()?.let {
+                    it.encodedPath == "/kf_fw_ig_halo.php" && it.queryParameter("do") == "buy"
+                } == true
+        }
+        val messages = messageSummaries(mainOriginal, path, action, sourceUrl)
+        val favorites = if (path == "profile.php" && action == "favor") parseFavorites(mainOriginal, sourceUrl, forms) else null
+        val bank = if (path == "hack.php" && source.queryParameter("H_name") == "bank" && action.isEmpty()) parseBank(mainOriginal, sourceUrl) else null
+        val blocklist = if (path == "message.php" && action == "banned") forms.firstNotNullOfOrNull { form ->
+            form.fields.singleOrNull { it.name == "banidinfo" && it.kind == SiteFieldKind.MULTILINE }?.let { NativeBlocklist(form.id, it.id) }
+        } else null
+        val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal, sourceUrl) else null
+        val statusTimeline = when {
+            path == "kf_fw_1wkfb.php" -> parseStatusTimeline(mainOriginal, sourceUrl)
+            path == "kf_growup.php" && growth != null -> NativeStatusTimeline("签到与成长", listOf(
+                StatusTimelineEntry(
+                    title = "每日签到",
+                    status = growth.claimStatus,
+                    description = when {
+                        growth.claimStatus == StatusKind.COMPLETED -> "站点已明确标记今日完成"
+                        growth.claimStatus == StatusKind.AVAILABLE -> "站点提供签到入口"
+                        growth.claimStatus == StatusKind.WAITING -> "站点状态为等待处理"
+                        growth.claimStatus == StatusKind.EXPIRED -> "站点明确标记已过期"
+                        growth.claimStatus == StatusKind.FAILED -> "站点明确标记失败"
+                        else -> "站点未提供可判断的状态"
+                    },
+                    action = growth.claimUrl?.let { routes.classify(it, "签到") }?.takeIf { it.effect != SiteEffect.READ },
+                )
+            ))
+            else -> null
+        }
+        val bankLog = if (path == "hack.php" && action == "log") parseBankLog(mainOriginal, sourceUrl) else null
+        val messageList = path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout") && mainOriginal.select("tr").any { row ->
+            row.select(">td,>th").map { it.text().trim() }.containsAll(listOf("标题", "发件人", "收件人"))
+        }
+        return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth,
+            messages, message, favorites, bank, blocklist, progress, messageList,
+            statusTimeline = statusTimeline, bankLog = bankLog, rewards = rewards,
+            messageClear = messageClear, messageExport = messageExport)
+    }
+
+    private data class MessageExtraction(
+        val body: String?,
+        val detail: NativeMessageDetail?,
+        val actions: List<SiteDestination>,
+    )
+
+    /**
+     * Pull the message body and its option-row actions out of the stable
+     * mailbox detail template, and drop the quota/navigation table that the
+     * native tabs already replace.
+     */
+    private fun extractMessageDetail(work: Element, path: String, action: String, sourceUrl: String): MessageExtraction {
+        if (path != "message.php") return MessageExtraction(null, null, emptyList())
+        work.select("table").forEach { table ->
+            val links = table.select("a[href]").map { it.attr("href") }
+            if (links.any { it.contains("message.php?action=receivebox") } &&
+                links.any { it.contains("message.php?action=sendbox") }) table.remove()
+        }
+        if (action !in setOf("read", "readscout")) return MessageExtraction(null, null, emptyList())
+        var messageBody: String? = null
+        var message: NativeMessageDetail? = null
+        val messageActions = mutableListOf<SiteDestination>()
+        val rows = work.select("tr").toList()
+        val optionIndex = rows.indexOfLast { row ->
+            val cells = row.select("> td")
+            val links = cells.getOrNull(1)?.select("a[href]").orEmpty()
+            cells.size == 2 && cells[0].text().trim().trimEnd(':', '：') in setOf("选项", "操作") && links.isNotEmpty() && links.all { a ->
+                html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl()?.let {
+                    it.encodedPath == "/message.php" && it.queryParameter("action") in setOf("write", "unread", "del", "receivebox", "sendbox", "scout")
+                } == true
+            }
+        }
+        if (optionIndex > 0) {
+            val optionRow = rows[optionIndex]
+            optionRow.select("> td").getOrNull(1)?.select("a[href]")?.forEach { a ->
+                val text = a.text().trim()
+                val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
+                if (text.isNotBlank()) messageActions.add(routes.classify(target, text))
+            }
+            // The stable detail template places content immediately
+            // before options. A long title is not the message body.
+            val bodyRow = rows.subList(0, optionIndex)
+                .filter { it.select("> td").size == 2 }
+                .lastOrNull()
+            bodyRow?.select("> td")?.getOrNull(1)?.clone()?.let { cell ->
+                cell.select("script,style").remove()
+                messageBody = cell.html().let { html.cleanContent(it, sourceUrl) }
+            }
+            val facts = rows.subList(0, optionIndex).filter { it !== bodyRow && it.select("> td").size == 2 }
+                .map { it.select("> td")[1].text().trim() }
+            if (messageBody != null && facts.size >= 3) {
+                message = NativeMessageDetail(facts[1], facts[0], facts[2], messageBody.orEmpty(), messageActions.toList(),
+                    messageActions.firstOrNull { it.effect == SiteEffect.READ && it.url.toHttpUrl().queryParameter("action") == "write" })
+            }
+            bodyRow?.remove()
+            optionRow.remove()
+        }
+        return MessageExtraction(messageBody, message, messageActions)
+    }
+
+    private fun buttonDestinations(
+        work: Element,
+        path: String,
+        action: String,
+        sourceUrl: String,
+        rewards: List<RewardAction>,
+        forms: List<SiteForm>,
+        unsupported: MutableList<String>,
+    ): List<SiteDestination> {
         // Reader pages carry script helpers for actions that already have a
         // native entry: postreply() opens the same reply form as the visible
         // post.php reply link, and cztz(floorN) only toggles the hidden action
@@ -126,7 +268,7 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             val href = a.attr("href")
             href.contains("post.php") && href.contains("action=reply")
         }
-        val buttonLinks = work.select("input[type=button], button, a[onclick]").mapNotNull { control ->
+        return work.select("input[type=button], button, a[onclick]").mapNotNull { control ->
             val label = control.attr("value").ifBlank { control.text() }.trim().take(100)
             if (label.isBlank()) return@mapNotNull null
             val js = control.attr("onclick").removePrefix("javascript:").trim()
@@ -177,160 +319,47 @@ class NativeSiteParser(private val origin: String, private val html: ForumHtmlPa
             if (control.attr("name") !in listOf("chkall")) unsupported.add(label)
             null
         }
-        if (profile != null) work.selectFirst("table.log1")?.remove()
-        if (path == "profile.php" && action == "modify") work.select("table.log1 tr").forEach { row ->
-            // Field widgets already have a dedicated editor; don't also discard
-            // new explanatory rows or unrelated tables introduced by the server.
-            if (row.select("input,textarea,select,button").isNotEmpty()) row.remove()
+    }
+
+    private fun messageSummaries(root: Element, path: String, action: String, sourceUrl: String): List<NativeMessageSummary> {
+        if (path != "message.php" || action !in setOf("", "receivebox", "sendbox", "scout")) return emptyList()
+        return root.select("a[href*='message.php?']").mapNotNull { a ->
+            val target = html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl() ?: return@mapNotNull null
+            if (target.queryParameter("action") !in setOf("read", "readscout")) return@mapNotNull null
+            val cells = a.closest("tr")?.select("> td").orEmpty()
+            if (cells.size < 6) return@mapNotNull null
+            // Tracking adds a selection column before its read marker.
+            val readCell = cells[if (action == "scout" && cells.size >= 7) 6 else 5]
+            NativeMessageSummary(target.toString(), a.text(), cells[2].text(), cells[3].text(), cells[4].text(),
+                readCell.text().trim().let { it == "否" || it.contains("未读") || it.contains("未阅读") },
+                cells[if (action in setOf("sendbox", "scout")) 3 else 2].selectFirst("a[href]")?.let { html.resolve(it.attr("href"), sourceUrl) }.orEmpty())
+        }.distinctBy { it.url }
+    }
+
+    private fun pageTitle(doc: Document, path: String, action: String, source: HttpUrl): String = when (path) {
+        "profile.php" -> when (action) { "modify" -> "修改资料"; "favor" -> "收藏管理"; else -> "会员资料" }
+        "message.php" -> when (action) { "read" -> "私信内容"; "readscout" -> "跟踪详情"; "banned" -> "屏蔽列表"; "scout" -> "消息跟踪"; "sendbox" -> "发件箱"; else -> "消息管理" }
+        "hack.php" -> when {
+            action == "log" -> "银行日志"
+            source.queryParameter("H_name") == "bank" -> "贡献与银行"
+            else -> "站点功能"
         }
-        // Several feature pages (notably the 争夺 dashboard) display state with
-        // readonly inputs instead of text. Preserve those values before the
-        // generic input cleanup so the fallback does not silently lose them.
-        work.select("input[readonly], input[disabled]").forEach { input ->
-            if (input.attr("type").lowercase() == "hidden") return@forEach
-            val value = input.attr("value").trim()
-            if (value.isNotBlank()) input.replaceWith(Element("span").text(value))
-        }
-        work.select("input,textarea,select,button,iframe,object,embed").remove()
-        work.select("a[onclick],a[href^=javascript:]").forEach { it.remove() }
-        var messageBody: String? = null
-        var message: NativeMessageDetail? = null
-        val messageActions = mutableListOf<SiteDestination>()
-        if (path == "message.php") {
-            // The mailbox quota + folder navigation table is duplicated by the
-            // native tabs, so drop it structurally before blocks are built.
-            work.select("table").forEach { table ->
-                val links = table.select("a[href]").map { it.attr("href") }
-                if (links.any { it.contains("message.php?action=receivebox") } &&
-                    links.any { it.contains("message.php?action=sendbox") }) table.remove()
-            }
-            if (action in setOf("read", "readscout")) {
-                val rows = work.select("tr").toList()
-                val optionIndex = rows.indexOfLast { row ->
-                    val cells = row.select("> td")
-                    val links = cells.getOrNull(1)?.select("a[href]").orEmpty()
-                    cells.size == 2 && cells[0].text().trim().trimEnd(':', '：') in setOf("选项", "操作") && links.isNotEmpty() && links.all { a ->
-                        html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl()?.let {
-                            it.encodedPath == "/message.php" && it.queryParameter("action") in setOf("write", "unread", "del", "receivebox", "sendbox", "scout")
-                        } == true
-                    }
-                }
-                if (optionIndex > 0) {
-                    val optionRow = rows[optionIndex]
-                    optionRow.select("> td").getOrNull(1)?.select("a[href]")?.forEach { a ->
-                        val text = a.text().trim()
-                        val target = html.resolve(a.attr("href"), sourceUrl) ?: return@forEach
-                        if (text.isNotBlank()) messageActions.add(routes.classify(target, text))
-                    }
-                    // The stable detail template places content immediately
-                    // before options. A long title is not the message body.
-                    val bodyRow = rows.subList(0, optionIndex)
-                        .filter { it.select("> td").size == 2 }
-                        .lastOrNull()
-                    bodyRow?.select("> td")?.getOrNull(1)?.clone()?.let { cell ->
-                        cell.select("script,style").remove()
-                        messageBody = cell.html().let { html.cleanContent(it, sourceUrl) }
-                    }
-                    val facts = rows.subList(0, optionIndex).filter { it !== bodyRow && it.select("> td").size == 2 }
-                        .map { it.select("> td")[1].text().trim() }
-                    if (messageBody != null && facts.size >= 3) {
-                        message = NativeMessageDetail(facts[1], facts[0], facts[2], messageBody.orEmpty(), messageActions.toList(),
-                            messageActions.firstOrNull { it.effect == SiteEffect.READ && it.url.toHttpUrl().queryParameter("action") == "write" })
-                    }
-                    bodyRow?.remove()
-                    optionRow.remove()
-                }
-            }
-        }
-        val extractedTables = mutableSetOf<Element>()
-        val blocks = buildBlocks(work, sourceUrl, extractedTables).map { block ->
-            if (block is NativeBlock.Table && path == "thread.php" &&
-                block.table.rows.firstOrNull()?.any { cell -> cell.link?.contains("post.php") == true } == true) {
-                val data = block.table.rows.drop(1)
-                val header = when (data.maxOfOrNull { row -> row.sumOf { it.colspan } }) {
-                    4 -> listOf(
-                        NativeCell("状态", bold = true), NativeCell("主题", bold = true),
-                        NativeCell("回复/查看", bold = true), NativeCell("最后发表", bold = true),
-                    )
-                    else -> emptyList()
-                }
-                block.copy(table = block.table.copy(rows = if (header.isEmpty()) data else listOf(header) + data, header = header.isNotEmpty()))
-            } else block
-        }.toMutableList()
-        if (!messageBody.isNullOrBlank()) {
-            val index = blocks.indexOfFirst { it is NativeBlock.Table }
-            blocks.add(if (index >= 0) index + 1 else 0, NativeBlock.Section("", messageBody.orEmpty()))
-        }
-        if (messageActions.isNotEmpty()) blocks.add(NativeBlock.Links(messageActions.distinctBy { it.url }))
-        val tables = blocks.filterIsInstance<NativeBlock.Table>().map { it.table }
-        val sections = blocks.filterIsInstance<NativeBlock.Section>().map { NativeSection(it.title, it.html) }
-        val links = mutableListOf<SiteDestination>()
-        val seen = mutableSetOf<String>()
-        fun addLink(link: SiteDestination?) {
-            if (link == null || link.url.isBlank() || !seen.add(link.url) || links.size >= 60) return
-            links.add(link)
-        }
-        profile?.links?.forEach(::addLink)
-        buttonLinks.forEach(::addLink)
-        work.select("a[href]").filter { a -> a.closest("table")?.let { it !in extractedTables } ?: true }.forEach { a ->
-            val href = a.attr("href")
-            val label = a.text().trim().ifBlank { a.attr("title") }.take(120)
-            if (label.isBlank() || href.startsWith('#') || href.startsWith("javascript:", true)) return@forEach
-            addLink(routes.classify(html.resolve(href, sourceUrl) ?: href, label))
-        }
-        val usefulLinks = links.filterNot { link ->
-            (path == "index.php" && link.url.toHttpUrlOrNull()?.pathSegments?.lastOrNull() in listOf("read.php", "thread.php")) ||
-                link.url.toHttpUrlOrNull()?.let { it.encodedPath == "/kf_fw_1wkfb.php" && it.queryParameter("do") == "1" } == true ||
-                link.url.toHttpUrlOrNull()?.let {
-                    it.encodedPath == "/kf_fw_ig_halo.php" && it.queryParameter("do") == "buy"
-                } == true
-        }
-        val messages = if (path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout")) {
-            mainOriginal.select("a[href*='message.php?']").mapNotNull { a ->
-                val target = html.resolve(a.attr("href"), sourceUrl)?.toHttpUrl() ?: return@mapNotNull null
-                if (target.queryParameter("action") !in setOf("read", "readscout")) return@mapNotNull null
-                val cells = a.closest("tr")?.select("> td").orEmpty()
-                if (cells.size < 6) return@mapNotNull null
-                // Tracking adds a selection column before its read marker.
-                val readCell = cells[if (action == "scout" && cells.size >= 7) 6 else 5]
-                NativeMessageSummary(target.toString(), a.text(), cells[2].text(), cells[3].text(), cells[4].text(),
-                    readCell.text().trim().let { it == "否" || it.contains("未读") || it.contains("未阅读") },
-                    cells[if (action in setOf("sendbox", "scout")) 3 else 2].selectFirst("a[href]")?.let { html.resolve(it.attr("href"), sourceUrl) }.orEmpty())
-            }.distinctBy { it.url }
-        } else emptyList()
-        val favorites = if (path == "profile.php" && action == "favor") parseFavorites(mainOriginal, sourceUrl, forms) else null
-        val bank = if (path == "hack.php" && source.queryParameter("H_name") == "bank" && action.isEmpty()) parseBank(mainOriginal, sourceUrl) else null
-        val blocklist = if (path == "message.php" && action == "banned") forms.firstNotNullOfOrNull { form ->
-            form.fields.singleOrNull { it.name == "banidinfo" && it.kind == SiteFieldKind.MULTILINE }?.let { NativeBlocklist(form.id, it.id) }
-        } else null
-        val progress = if (path == "kf_lv200.php") parseProgress(mainOriginal, sourceUrl) else null
-        val statusTimeline = when {
-            path == "kf_fw_1wkfb.php" -> parseStatusTimeline(mainOriginal, sourceUrl)
-            path == "kf_growup.php" && growth != null -> NativeStatusTimeline("签到与成长", listOf(
-                StatusTimelineEntry(
-                    title = "每日签到",
-                    status = growth.claimStatus,
-                    description = when {
-                        growth.claimStatus == StatusKind.COMPLETED -> "站点已明确标记今日完成"
-                        growth.claimStatus == StatusKind.AVAILABLE -> "站点提供签到入口"
-                        growth.claimStatus == StatusKind.WAITING -> "站点状态为等待处理"
-                        growth.claimStatus == StatusKind.EXPIRED -> "站点明确标记已过期"
-                        growth.claimStatus == StatusKind.FAILED -> "站点明确标记失败"
-                        else -> "站点未提供可判断的状态"
-                    },
-                    action = growth.claimUrl?.let { routes.classify(it, "签到") }?.takeIf { it.effect != SiteEffect.READ },
-                )
-            ))
-            else -> null
-        }
-        val bankLog = if (path == "hack.php" && action == "log") parseBankLog(mainOriginal, sourceUrl) else null
-        val messageList = path == "message.php" && action in setOf("", "receivebox", "sendbox", "scout") && mainOriginal.select("tr").any { row ->
-            row.select(">td,>th").map { it.text().trim() }.containsAll(listOf("标题", "发件人", "收件人"))
-        }
-        return NativeSitePage(title, profile, sections, usefulLinks, forms, unsupported.distinct(), tables, blocks, growth,
-            messages, message, favorites, bank, blocklist, progress, messageList,
-            statusTimeline = statusTimeline, bankLog = bankLog, rewards = rewards,
-            messageClear = messageClear, messageExport = messageExport)
+        "kf_no1.php" -> "会员排行"
+        "kf_growup.php" -> "签到与成长"
+        "kf_fw_1wkfb.php" -> "评分与记录"
+        "kf_fw_ig_index.php" -> "争夺奖励"
+        "kf_fw_ig_mybp.php" -> "我的物品"
+        "kf_fw_ig_halo.php" -> "战力光环"
+        "kf_fw_ig_pklist.php" -> "争夺排行"
+        "kf_fw_ig_shop.php" -> "物品商店"
+        "kf_fw_ig_readme.php" -> "争夺帮助"
+        "kf_lv200.php" -> "进度分"
+        "fyg_sjcdwj.php" -> "咕咕镇"
+        "guanjianci.php" -> "被 @ 记录"
+        "faq.php" -> "帮助与规则"
+        "register.php" -> "注册账号"
+        "login.php" -> "账号登录"
+        else -> doc.title().substringBefore(" - ").trim().ifBlank { "站点功能" }
     }
 
     /**

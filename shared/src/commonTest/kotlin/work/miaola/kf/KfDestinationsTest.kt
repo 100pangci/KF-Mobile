@@ -28,6 +28,21 @@ class KfDestinationsTest {
         assertFalse(KfDestinationKind.GUGU.isTopLevel)
     }
 
+    @Test fun nativeAndDetailPredicatesAgreeWithTheClassifier() {
+        fun page(url: String) = PageData(url, "", authenticated = false)
+        assertTrue(KfDestinations.isNativePage(page("hack.php")))
+        assertTrue(KfDestinations.isNativePage(page("message.php?action=read&mid=1")))
+        assertTrue(KfDestinations.isNativePage(page("profile.php?action=show&uid=1")))
+        assertFalse(KfDestinations.isNativePage(page("thread.php?fid=1")))
+        assertFalse(KfDestinations.isNativePage(page("profile.php?action=favor")))
+        assertFalse(KfDestinations.isNativePage(page("message.php?action=receivebox")))
+        assertFalse(KfDestinations.isNativePage(null))
+        assertTrue(KfDestinations.isDetailDestination("read.php?tid=1"))
+        assertTrue(KfDestinations.isDetailDestination("message.php?action=read&mid=1"))
+        assertFalse(KfDestinations.isDetailDestination("message.php?action=receivebox"))
+        assertFalse(KfDestinations.isDetailDestination("index.php"))
+    }
+
     @Test fun searchRouteEscapesArgumentsAndResultUrlsIndependently() {
         assertEquals("search?q=%E7%BB%AF%E6%9C%88%20%26%3F%23%25&author=a%7Cb&url=", KfSearchRoute.create("绯月 &?#%", "a|b"))
         assertEquals("search?q=&author=&url=search.php%3Fsearchid%3Dabc%26page%3D2", KfSearchRoute.create(resultUrl = "search.php?searchid=abc&page=2"))

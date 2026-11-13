@@ -10,6 +10,10 @@ import org.jsoup.safety.Safelist
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 
+/** The site's main column is the last `.dcol` fixed at 900px; fallbacks live with callers. */
+internal fun mainColumn(doc: Document): Element? =
+    doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") }
+
 class ForumHtmlParser(private val origin: String) {
     private val routes = SiteRoutePolicy(origin)
     private val base = origin.toHttpUrl()
@@ -301,7 +305,7 @@ class ForumHtmlParser(private val origin: String) {
         }.distinctBy { it.id }.take(500).toList()
     }
 
-    private fun contentRoot(doc: Document): Element = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") } ?: doc.body()
+    private fun contentRoot(doc: Document): Element = mainColumn(doc) ?: doc.body()
 
     private fun listingLinks(doc: Document, group: String): List<SiteLink> =
         contentRoot(doc).select("a[href*='read.php?']").filter { resolve(it.attr("href"), doc.baseUri())?.toHttpUrl()?.queryParameter("tid") != null }

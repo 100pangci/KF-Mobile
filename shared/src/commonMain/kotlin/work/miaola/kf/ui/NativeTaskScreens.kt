@@ -16,68 +16,81 @@ import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import work.miaola.kf.*
 
+private enum class NativeTaskKind {
+    BANK_LOG, MESSAGE, BLOCKLIST, SCOUT_LIST, PROFILE, PROFILE_SETTINGS, BANK,
+    STATUS_TIMELINE, REWARD, PROGRESS, FAQ, RANKING, RECORDS, SCORE_RECORDS,
+}
+
+/** Single source of truth for the native task dispatch precedence. */
+private fun nativeTaskKind(page: PageData?): NativeTaskKind? {
+    val current = page ?: return null
+    val native = current.nativePage ?: return null
+    val path = current.url.substringBefore('?').substringAfterLast('/')
+    return when {
+        native.bankLog != null -> NativeTaskKind.BANK_LOG
+        native.message != null -> NativeTaskKind.MESSAGE
+        native.blocklist != null -> NativeTaskKind.BLOCKLIST
+        path == "message.php" && current.url.contains("action=scout") && native.hasMessageList -> NativeTaskKind.SCOUT_LIST
+        native.profile != null -> NativeTaskKind.PROFILE
+        path == "profile.php" && current.url.contains("action=modify") && native.forms.size >= 1 -> NativeTaskKind.PROFILE_SETTINGS
+        native.bank != null -> NativeTaskKind.BANK
+        native.statusTimeline != null -> NativeTaskKind.STATUS_TIMELINE
+        native.rewards.isNotEmpty() -> NativeTaskKind.REWARD
+        native.progress != null -> NativeTaskKind.PROGRESS
+        path == "faq.php" -> NativeTaskKind.FAQ
+        path == "kf_no1.php" && native.tables.any { it.records(true).isNotEmpty() } -> NativeTaskKind.RANKING
+        path in setOf("kf_fw_1wkfb.php", "guanjianci.php", "kf_share.php") &&
+            native.tables.any { it.records().isNotEmpty() } -> NativeTaskKind.RECORDS
+        path in setOf("kf_lv200.php", "guanjianci.php") && native.forms.isEmpty() -> NativeTaskKind.SCORE_RECORDS
+        else -> null
+    }
+}
+
 /** Return false when the task's stable structure is absent: keep the compatibility UI. */
 @Composable
 internal fun NativeTaskScreen(c: AppController, page: PageData, actions: KfActions, rich: RichContent, avatar: ForumImage): Boolean {
     val native = page.nativePage ?: return false
-    val path = page.url.substringBefore('?').substringAfterLast('/')
-    when {
-        native.bankLog != null -> BankLogScreen(c, native, actions)
-        native.message != null -> MessageDetailScreen(c, native, actions, rich)
-        native.blocklist != null -> BlocklistScreen(c, native, actions, rich)
-        path == "message.php" && page.url.contains("action=scout") && native.hasMessageList -> ListingScreen(c, actions, page, isMessages = true, rich = rich)
-        native.profile != null -> ProfileScreen(c, native, actions, rich, avatar)
-        path == "profile.php" && page.url.contains("action=modify") && native.forms.size >= 1 -> ProfileSettingsScreen(c, native, actions, rich)
-        native.bank != null -> BankScreen(c, native, actions, rich)
-        native.statusTimeline != null -> StatusTimelineScreen(c, page, native, actions, rich)
-        native.rewards.isNotEmpty() -> RewardScreen(c, page, native, actions, rich)
-        native.progress != null -> ProgressScreen(c, page, actions, rich)
-        path == "faq.php" -> FaqScreen(c, native, actions, rich)
-        path == "kf_no1.php" && native.tables.any { it.records(true).isNotEmpty() } -> RecordScreen(c, page, actions, rich, ranking = true)
-        path in setOf("kf_fw_1wkfb.php", "guanjianci.php", "kf_share.php") && native.tables.any { it.records().isNotEmpty() } -> RecordScreen(c, page, actions, rich, ranking = false)
-        path in setOf("kf_lv200.php", "guanjianci.php") && native.forms.isEmpty() -> RecordScreen(c, page, actions, rich, ranking = false)
-        else -> return false
+    when (nativeTaskKind(page)) {
+        NativeTaskKind.BANK_LOG -> BankLogScreen(c, native, actions)
+        NativeTaskKind.MESSAGE -> MessageDetailScreen(c, native, actions, rich)
+        NativeTaskKind.BLOCKLIST -> BlocklistScreen(c, native, actions, rich)
+        NativeTaskKind.SCOUT_LIST -> ListingScreen(c, actions, page, isMessages = true, rich = rich)
+        NativeTaskKind.PROFILE -> ProfileScreen(c, native, actions, rich, avatar)
+        NativeTaskKind.PROFILE_SETTINGS -> ProfileSettingsScreen(c, native, actions, rich)
+        NativeTaskKind.BANK -> BankScreen(c, native, actions, rich)
+        NativeTaskKind.STATUS_TIMELINE -> StatusTimelineScreen(c, page, native, actions, rich)
+        NativeTaskKind.REWARD -> RewardScreen(c, page, native, actions, rich)
+        NativeTaskKind.PROGRESS -> ProgressScreen(c, page, actions, rich)
+        NativeTaskKind.FAQ -> FaqScreen(c, native, actions, rich)
+        NativeTaskKind.RANKING -> RecordScreen(c, page, actions, rich, ranking = true)
+        NativeTaskKind.RECORDS, NativeTaskKind.SCORE_RECORDS -> RecordScreen(c, page, actions, rich, ranking = false)
+        null -> return false
     }
     return true
 }
 
-/**
- * True only when [NativeTaskScreen] will render a screen that owns
- * pull-to-refresh. Keep this precedence in sync with the dispatch above.
- */
-internal fun nativeTaskUsesPullToRefresh(page: PageData?): Boolean {
-    val current = page ?: return false
-    val native = current.nativePage ?: return false
-    val path = current.url.substringBefore('?').substringAfterLast('/')
-    return when {
-        native.bankLog != null -> false
-        native.message != null -> false
-        native.blocklist != null -> false
-        path == "message.php" && current.url.contains("action=scout") && native.hasMessageList -> true
-        native.profile != null -> false
-        path == "profile.php" && current.url.contains("action=modify") && native.forms.size >= 1 -> false
-        native.bank != null -> false
-        native.statusTimeline != null -> true
-        native.rewards.isNotEmpty() -> false
-        native.progress != null -> false
-        path == "faq.php" -> false
-        path == "kf_no1.php" && native.tables.any { it.records(true).isNotEmpty() } -> true
-        path in setOf("kf_fw_1wkfb.php", "guanjianci.php", "kf_share.php") &&
-            native.tables.any { it.records().isNotEmpty() } -> true
-        path in setOf("kf_lv200.php", "guanjianci.php") && native.forms.isEmpty() -> true
-        else -> false
-    }
+internal fun nativeTaskUsesPullToRefresh(page: PageData?): Boolean = when (nativeTaskKind(page)) {
+    NativeTaskKind.SCOUT_LIST,
+    NativeTaskKind.STATUS_TIMELINE,
+    NativeTaskKind.RANKING,
+    NativeTaskKind.RECORDS,
+    NativeTaskKind.SCORE_RECORDS,
+    -> true
+    else -> false
 }
 
 @Composable
@@ -178,9 +191,10 @@ private fun StatusTimelineScreen(c: AppController, page: PageData, native: Nativ
                             Text(entry.description, Modifier.padding(top = 3.dp), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 3, overflow = TextOverflow.Ellipsis)
                         }
-                        if (entry.relatedUrl.isNotBlank()) Text("查看相关主题", Modifier.padding(top = 4.dp)
-                            .clickable { actions.open(entry.relatedUrl) }, style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary)
+                        if (entry.relatedUrl.isNotBlank()) TextButton(
+                            onClick = { actions.open(entry.relatedUrl) },
+                            contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                        ) { Text("查看相关主题", style = MaterialTheme.typography.labelMedium) }
                         entry.action?.let { action ->
                             // Rating entries and other change links open the
                             // site's own result page after confirmation; they
@@ -356,7 +370,10 @@ private fun ProgressScreen(c: AppController, page: PageData, actions: KfActions,
                 KfCard(shape = KfTileShape) {
                     Column(
                         Modifier.fillMaxWidth().then(
-                            if (penalty.url.isNotBlank()) Modifier.clickable { actions.open(penalty.url) } else Modifier,
+                            if (penalty.url.isNotBlank()) Modifier.clickable(
+                                onClickLabel = "查看扣分记录",
+                                role = Role.Button,
+                            ) { actions.open(penalty.url) } else Modifier,
                         ),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
@@ -474,6 +491,37 @@ private fun ProfileSettingsScreen(c: AppController, native: NativeSitePage, acti
 private fun BankScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val bank = native.bank ?: return
     var active by rememberSaveable { mutableStateOf<String?>(null) }
+    val initialValues = remember(native) {
+        native.forms.associate { form -> form.id to form.fields.associate { it.id to it.initial } }
+    }
+    // Values live above the collapsible card: collapsing, switching forms or a
+    // configuration change must not discard typed bank input.
+    val valuesByForm = rememberSaveable(native, saver = listSaver(
+        save = { state ->
+            state.entries.flatMap { (formId, fields) ->
+                fields.entries.flatMap { (fieldId, values) ->
+                    listOf(formId, fieldId, values.size.toString(), values.joinToString("\u0001"))
+                }
+            }
+        },
+        restore = { flat ->
+            val restored = mutableStateMapOf<String, SnapshotStateMap<String, List<String>>>()
+            flat.chunked(4).forEach { entry ->
+                val size = entry[2].toIntOrNull() ?: 0
+                restored.getOrPut(entry[0]) { mutableStateMapOf() }[entry[1]] =
+                    if (size == 0) emptyList() else entry[3].split('\u0001')
+            }
+            restored
+        },
+    )) {
+        mutableStateMapOf<String, SnapshotStateMap<String, List<String>>>().apply {
+            initialValues.forEach { (formId, fields) ->
+                put(formId, mutableStateMapOf<String, List<String>>().apply {
+                    fields.forEach { (fieldId, values) -> put(fieldId, values) }
+                })
+            }
+        }
+    }
     LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         if (bank.balances.isNotEmpty()) item {
             KfCard {
@@ -504,7 +552,9 @@ private fun BankScreen(c: AppController, native: NativeSitePage, actions: KfActi
                 onToggle = { active = if (active == form.id) null else form.id },
                 icon = Icons.Default.AccountBalanceWallet,
             ) {
-                val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
+                val values = valuesByForm.getOrPut(form.id) {
+                    mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } }
+                }
                 form.fields.forEach { field -> NativeField(c, form, field, values[field.id].orEmpty()) { values[field.id] = it } }
                 Text(form.warning, style = MaterialTheme.typography.bodySmall)
                 form.submits.forEach { submit -> Button(onClick = { c.requestSiteSubmit(form, values.toMap(), submit) }, enabled = !c.siteBusy, modifier = Modifier.fillMaxWidth(), shape = KfFieldShape) {
@@ -557,7 +607,10 @@ private fun RecordScreen(c: AppController, page: PageData, actions: KfActions, r
                             if (ranking) KfPill(record.title, Modifier.padding(end = KfSpacing.Sm),
                                 container = MaterialTheme.colorScheme.primaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer)
-                            Text(record.primary.text, Modifier.weight(1f).then(if (record.primary.link != null) Modifier.clickable { actions.open(record.primary.link) } else Modifier),
+                            Text(record.primary.text, Modifier.weight(1f).then(if (record.primary.link != null) Modifier.clickable(
+                                onClickLabel = "打开排行榜用户",
+                                role = Role.Button,
+                            ) { actions.open(record.primary.link) } else Modifier),
                                 style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                             if (ranking && record.primary.text == c.home?.username) Text("你", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelSmall)
                         }

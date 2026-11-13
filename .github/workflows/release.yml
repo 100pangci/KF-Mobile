@@ -45,6 +45,9 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
           test -s "$RUNNER_TEMP/release.jks"
 
+      - name: Test packaging tools
+        run: python -m unittest tools/test_probe_login.py tools/test_package.py
+
       - name: Build signed release
         env:
           ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.jks

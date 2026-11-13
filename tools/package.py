@@ -3,19 +3,24 @@
 import hashlib
 import http.cookiejar
 import json
+import os
 import re
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXCLUDED = {".secrets", ".gradle", ".kotlin", ".idea", "build", "artifacts", "__pycache__", ".git"}
+EXCLUDED = {".secrets", ".gradle", ".kotlin", ".idea", ".vscode", ".fleet", ".vs",
+            "build", "artifacts", "captures", "__pycache__", ".git",
+            ".externalNativeBuild", ".cxx"}
+EXCLUDED_SUFFIXES = {".pyc", ".hprof", ".log", ".apk", ".aab", ".zip", ".iml"}
 
 
 def included(relative):
     return not (set(relative.parts) & EXCLUDED or private_path(relative)
-                or relative.suffix in {".pyc", ".hprof", ".log"})
+                or relative.suffix.lower() in EXCLUDED_SUFFIXES)
 
 
 def private_path(relative):
@@ -59,6 +64,40 @@ def audit_archive(path, tokens, source=False):
                 raise ValueError("Private session value found in distribution")
 
 
+def tracked_files():
+    """Enumerate the repository through Git so ignored local data never enters
+    the source archive, even when it is not covered by the hard-coded list."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            check=True, capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return sorted(path for path in ROOT.rglob("*") if path.is_file())
+    return [ROOT / os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
+
+
+def newest_mtime(paths):
+    return max((path.stat().st_mtime for path in paths if path.is_file()), default=0.0)
+
+
+def require_fresh(label, artifact, build_inputs):
+    if not artifact.is_file():
+        raise ValueError(f"Missing {label}: {artifact.relative_to(ROOT)}")
+    if artifact.stat().st_mtime < newest_mtime(build_inputs):
+        raise ValueError(
+            f"Stale {label}: a build input is newer than {artifact.relative_to(ROOT)}; "
+            "rerun the full verification build before packaging"
+        )
+
+
+def lint_errors(path):
+    if not path.is_file():
+        return []
+    root = ET.parse(path).getroot()
+    return [issue for issue in root.findall("issue") if issue.get("severity") in {"Error", "Fatal"}]
+
+
 def main():
     build_script = (ROOT / "androidApp/build.gradle.kts").read_text(encoding="utf-8")
     match = re.search(r'versionName\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', build_script)
@@ -71,18 +110,31 @@ def main():
     results = [ET.parse(p).getroot() for p in tests]
     if any(int(r.get("failures", 0)) or int(r.get("errors", 0)) for r in results):
         raise ValueError("Refusing to package failing test results")
+    if sum(int(r.get("tests", 0)) for r in results) <= 0:
+        raise ValueError("Refusing to package an empty test report")
+    input_suffixes = {".kt", ".kts", ".xml", ".properties", ".toml"}
+    build_inputs = [path for path in tracked_files() if path.suffix.lower() in input_suffixes]
+    apk_source = ROOT / "androidApp/build/outputs/apk/debug/androidApp-debug.apk"
     lint_file = ROOT / "androidApp/build/reports/lint-results-debug.xml"
-    lint = ET.parse(lint_file).getroot()
-    if any(i.get("severity") in {"Error", "Fatal"} for i in lint.findall("issue")):
+    require_fresh("test results", min(tests, key=lambda p: p.stat().st_mtime), build_inputs)
+    require_fresh("debug APK", apk_source, build_inputs)
+    require_fresh("lint report", lint_file, build_inputs)
+    if lint_errors(lint_file):
         raise ValueError("Refusing to package lint errors")
+    lint = ET.parse(lint_file).getroot()
+    shared_lint = ROOT / "shared/build/reports/lint-results-debug.xml"
+    if lint_errors(shared_lint):
+        raise ValueError("Refusing to package shared lint errors")
 
     output = ROOT / "artifacts"
     output.mkdir(exist_ok=True)
     apk = output / ("KF-Mobile-" + version + "-debug.apk")
-    shutil.copy2(ROOT / "androidApp/build/outputs/apk/debug/androidApp-debug.apk", apk)
+    shutil.copy2(apk_source, apk)
     source = output / ("KF-Mobile-" + version + "-source.zip")
     with zipfile.ZipFile(source, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(ROOT.rglob("*")):
+        # Git-tracked files only: local captures, caches and untracked private
+        # files are excluded even if the exclusion list misses a new pattern.
+        for path in sorted(tracked_files()):
             relative = path.relative_to(ROOT)
             if path.is_file() and included(relative):
                 archive.write(path, relative.as_posix())

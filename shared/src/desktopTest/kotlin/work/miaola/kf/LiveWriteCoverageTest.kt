@@ -289,15 +289,15 @@ class LiveWriteCoverageTest {
             )
             val inbox = service.fetch("message.php?action=receivebox")
             assertTrue(
-                inbox.nativePage?.messages.orEmpty().any { it.title.contains(marker) },
+                inbox.nativePage?.messages.orEmpty().any { it.title.contains(marker) && it.sender == account },
                 "The self-addressed message is not visible in the receivebox.",
             )
             val form = inbox.nativePage?.forms?.firstOrNull { candidate ->
-                candidate.fields.any { it.name == "delid[]" && it.label.contains("KF写回验证") }
+                candidate.fields.any { it.name == "delid[]" && it.label.contains(marker) }
             } ?: fail("The receivebox did not expose a delete control for the test message; check the inbox manually.")
-            // Remove every marker this test (or an earlier interrupted run)
-            // created; never touch a message without the test prefix.
-            val targets = form.fields.filter { it.name == "delid[]" && it.label.contains("KF写回验证") }
+            // Delete only this run's marker. Never touch an unrelated message,
+            // including leftovers from an interrupted earlier run.
+            val targets = form.fields.filter { it.name == "delid[]" && it.label.contains(marker) }
             val submit = form.submits.firstOrNull() ?: fail("The receivebox delete form has no submit control.")
             val state = form.fields.associate { field ->
                 field.id to if (field in targets) field.options.map { it.value } else field.initial
@@ -309,8 +309,8 @@ class LiveWriteCoverageTest {
             assertIs<SiteActionResult.Response>(deleted)
             val after = service.fetch("message.php?action=receivebox")
             assertFalse(
-                after.nativePage?.messages.orEmpty().any { it.title.contains("KF写回验证") },
-                "A test message was not deleted; check the receivebox manually.",
+                after.nativePage?.messages.orEmpty().any { it.title.contains(marker) },
+                "The test message was not deleted; check the receivebox manually.",
             )
         }
     }

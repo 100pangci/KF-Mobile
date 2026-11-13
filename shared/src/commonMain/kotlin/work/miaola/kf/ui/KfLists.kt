@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import work.miaola.kf.*
 
 @Composable
@@ -70,16 +71,18 @@ internal fun ListInteractions(c: AppController, state: LazyListState, page: Page
     val latestPage by rememberUpdatedState(page)
     val rootUrl = timeline?.first?.url ?: page?.url.orEmpty()
     var anchorReady by remember(rootUrl) { mutableStateOf(false) }
-    LaunchedEffect(timeline, page?.url, state.layoutInfo.totalItemsCount, timeline?.next, timeline?.loadedPageUrls?.size) {
+    LaunchedEffect(timeline, page?.url, timeline?.next, timeline?.loadedPageUrls?.size) {
         if (anchorReady) return@LaunchedEffect
         val saved = c.anchorFor(rootUrl)
         if (saved == null) { anchorReady = true; return@LaunchedEffect }
-        if (state.layoutInfo.totalItemsCount <= 0) return@LaunchedEffect
+        // Observe the count inside the effect. Reading layoutInfo during
+        // composition would recompose on every scroll frame.
+        val count = snapshotFlow { state.layoutInfo.totalItemsCount }.first { it > 0 }
         val keyIndex = saved.anchorKey.takeIf { it.isNotBlank() }?.let { key ->
-            (0 until state.layoutInfo.totalItemsCount).firstOrNull { anchorKeyAt?.invoke(it) == key }
+            (0 until count).firstOrNull { anchorKeyAt?.invoke(it) == key }
         }
         val index = if (saved.anchorKey.isNotBlank()) keyIndex else saved.anchorIndex
-        if (index != null && index in 0 until state.layoutInfo.totalItemsCount) {
+        if (index != null && index in 0 until count) {
             state.scrollToItem(index, saved.anchorOffset)
             anchorReady = true
         } else if (timeline?.failure != null || timeline?.next == null ||

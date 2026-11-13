@@ -28,6 +28,7 @@ import work.miaola.kf.GuguMenu
 import work.miaola.kf.GuguShopItem
 import work.miaola.kf.GuguSnapshot
 import work.miaola.kf.GuguWinRateTable
+import work.miaola.kf.*
 
 @Composable
 fun GuguScreen(c: AppController, actions: KfActions) {

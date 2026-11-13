@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -424,7 +425,7 @@ private fun LinkFlow(links: List<SiteDestination>, onLink: (String) -> Unit, mod
     FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         links.forEachIndexed { index, link ->
             if (index > 0) Text("·", color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
-            Text(link.title.ifBlank { "打开" }, Modifier.clickable { onLink(link.url) }.padding(vertical = 2.dp),
+            Text(link.title.ifBlank { "打开" }, Modifier.clickable(onClickLabel = "打开页面", role = Role.Button) { onLink(link.url) }.padding(vertical = 2.dp),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
         }
     }

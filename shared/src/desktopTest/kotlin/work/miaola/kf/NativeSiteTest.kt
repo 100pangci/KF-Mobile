@@ -592,20 +592,14 @@ class NativeSiteTest {
         assertEquals(listOf("rpc:admove"), page.forms.map { it.id })
     }
 
-    @Test fun androidUsesNavigationComposePredictiveBackWithoutWebView() {
+    @Test fun androidEntryHasNoWebViewOrBrowserActivity() {
+        // Static checks only: navigation behavior itself is covered by the
+        // shared controller tests and the device checklist, not by matching
+        // implementation strings in Kotlin sources.
         val root = Path.of(System.getProperty("kf.projectRoot"))
-        assertFalse(Files.readString(root.resolve("androidApp/src/main/AndroidManifest.xml")).contains("BrowserActivity"))
-        assertTrue(Files.readString(root.resolve("androidApp/src/main/AndroidManifest.xml")).contains("enableOnBackInvokedCallback=\"true\""))
-        val activity = Files.readString(root.resolve("androidApp/src/main/kotlin/work/miaola/kf/MainActivity.kt"))
-        assertFalse(activity.contains("PredictiveBackHandler"))
-        assertFalse(activity.contains("graphicsLayer"), "Navigation chrome must not scale the whole app")
-        val shell = Files.readString(root.resolve("androidApp/src/main/kotlin/work/miaola/kf/nav/KfRoot.kt"))
-        assertTrue(shell.contains("NavHost("))
-        assertTrue(shell.contains("popEnterTransition"))
-        assertTrue(shell.contains("popExitTransition"))
-        assertTrue(shell.contains("BackHandler"), "Only the editor draft guard may intercept back")
-        assertFalse(shell.contains("LaunchedEffect(c.showSettings)"), "Settings must not retrigger its own destination")
-        assertTrue(shell.contains("pendingNativePage"))
+        val manifest = Files.readString(root.resolve("androidApp/src/main/AndroidManifest.xml"))
+        assertFalse(manifest.contains("BrowserActivity"))
+        assertTrue(manifest.contains("enableOnBackInvokedCallback=\"true\""))
         Files.walk(root.resolve("androidApp/src/main/kotlin")).use { paths ->
             paths.filter { it.toString().endsWith(".kt") }.forEach { file ->
                 val source = Files.readString(file)

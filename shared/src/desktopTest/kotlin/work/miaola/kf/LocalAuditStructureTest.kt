@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlinx.serialization.json.*
 import org.junit.Assume.assumeTrue
 import kotlin.test.Test
+import kotlin.test.assertTrue
 
 /** Opt-in, offline protocol evidence. No identifiers, values or free text in output. */
 class LocalAuditStructureTest {
@@ -25,7 +26,16 @@ class LocalAuditStructureTest {
                 else -> ""
             }
             val doc = parser.document(Files.readString(root.resolve(entry.jsonObject.getValue("capture").jsonPrimitive.content + ".html")), source)
-            val native = parser.parse(doc.outerHtml(), source).nativePage!!
+            val native = parser.parse(doc.outerHtml(), source).nativePage
+                ?: error("the parser produced no native page for $type")
+            assertTrue(
+                native.forms.isNotEmpty() || native.links.isNotEmpty() || native.messages.isNotEmpty() ||
+                    native.blocks.isNotEmpty() || native.tables.isNotEmpty() || native.progress != null ||
+                    native.message != null || native.rewards.isNotEmpty() || native.bank != null ||
+                    native.bankLog != null || native.blocklist != null || native.profile != null ||
+                    native.statusTimeline != null,
+                "the parser recognized no structure in the captured $type page",
+            )
             val main = doc.select(".dcol").lastOrNull { it.attr("style").contains("900px") } ?: doc.body()
             buildJsonObject {
                 put("type", type)
@@ -77,6 +87,7 @@ class LocalAuditStructureTest {
                 } }))
             }
         }
+        assertTrue(entries.isNotEmpty(), "no captured page matched the audited page types")
         writeAuditJson(root.resolve("protocol-shapes.json"), JsonArray(entries))
     }
 }

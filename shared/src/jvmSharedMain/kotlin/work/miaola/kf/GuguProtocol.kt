@@ -883,12 +883,16 @@ internal class GuguProtocol {
         } catch (_: Exception) { null }
         val failure = listOf("失败", "不足", "不能", "无法", "已满", "错误", "禁止", "未登录", "请先",
             "超过", "不可", "无效", "没有", "已失效", "不存在").any { clean.contains(it) }
+        // "操作不成功"/"未能成功" also contain the positive substring "成功".
+        val explicitFailure = listOf("不成功", "未成功", "无法成功", "没有成功", "未能成功")
+            .any { clean.contains(it) }
         when {
             clean == "ok" || clean == "1" -> GuguActionResult.Success("操作成功", refreshed)
             known.kind == GuguActionKind.PIERCE_ITEM && clean.matches(Regex("[0-9]{1,12}")) ->
                 GuguActionResult.Success("熔炼已提交，服务器返回编号 $clean", refreshed)
-            clean.contains("成功") -> GuguActionResult.Success(clean.ifBlank { "操作成功" }, refreshed)
+            explicitFailure -> GuguActionResult.Rejected(clean.ifBlank { "服务器拒绝了该操作" })
             failure -> GuguActionResult.Rejected(clean.ifBlank { "服务器拒绝了该操作" })
+            clean.contains("成功") -> GuguActionResult.Success(clean.ifBlank { "操作成功" }, refreshed)
             clean.isBlank() -> GuguActionResult.Uncertain("服务器未返回可确认的结果；请重新读取状态核对", refreshed)
             else -> GuguActionResult.Uncertain("已提交，站点返回：$clean", refreshed)
         }

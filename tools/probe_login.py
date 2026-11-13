@@ -56,7 +56,11 @@ def origin(url):
 
 
 def same_origin(base, target):
-    url = urllib.parse.urljoin(base, target)
+    joined = urllib.parse.urljoin(base, target)
+    parts = urllib.parse.urlsplit(joined)
+    # urljoin keeps a bare "?" when the relative target ends with it. Normalise
+    # the empty query/fragment away so request URLs stay canonical.
+    url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, parts.fragment))
     if origin(base) != origin(url):
         raise ValueError("Cross-origin request blocked")
     return url

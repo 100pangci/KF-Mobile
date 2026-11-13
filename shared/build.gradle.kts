@@ -50,9 +50,23 @@ android {
 
 tasks.withType<Test>().configureEach {
     systemProperty("kf.projectRoot", rootProject.projectDir.absolutePath)
-    inputs.property("liveReadEnabled", providers.environmentVariable("KF_LIVE_TEST").orElse("false"))
-    inputs.property("liveLoginEnabled", providers.environmentVariable("KF_LOGIN_TEST").orElse("false"))
-    inputs.property("siteAuditEnabled", providers.environmentVariable("KF_SITE_AUDIT").orElse("false"))
-    inputs.property("auditRenderEnabled", providers.environmentVariable("KF_AUDIT_RENDER").orElse("false"))
-    outputs.upToDateWhen { System.getenv("KF_LIVE_TEST") != "true" && System.getenv("KF_LOGIN_TEST") != "true" && System.getenv("KF_SITE_AUDIT") != "true" && System.getenv("KF_AUDIT_RENDER") != "true" }
+    // Every opt-in live path must be a task input. Otherwise the write tests can
+    // be silently skipped as UP-TO-DATE after an ordinary test run.
+    val liveFlags = listOf(
+        "KF_LIVE_TEST",
+        "KF_LOGIN_TEST",
+        "KF_SITE_AUDIT",
+        "KF_AUDIT_RENDER",
+        "KF_LIVE_WRITE_TEST",
+        "KF_LIVE_FULL_WRITE_TEST",
+    )
+    liveFlags.forEach { name ->
+        inputs.property(name, providers.environmentVariable(name).orElse("false"))
+    }
+    // Local captures/cookies decide whether several opt-in tests can run at all.
+    inputs.files(rootProject.fileTree(".secrets") { include("*.cookies.txt", "site-audit/**") })
+        .withPropertyName("localLiveFixtures").optional()
+    // Any live switch disables up-to-date checks so a previously successful run
+    // can never masquerade as this run's result.
+    outputs.upToDateWhen { liveFlags.none { System.getenv(it) == "true" } }
 }

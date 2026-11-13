@@ -184,39 +184,45 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         error("页面跳转次数过多")
     }
 
+    /** Parsing and model building are CPU work; never run them on the UI dispatcher. */
+    private suspend fun <T> offMain(block: () -> T): T = withContext(Dispatchers.Default) { block() }
+
     override suspend fun fetch(url: String): PageData {
         val raw = raw(url)
-        return parser.parse(raw.html, raw.url)
+        return offMain { parser.parse(raw.html, raw.url) }
     }
 
     override suspend fun login(username: String, password: String): PageData {
         val login = raw("login.php")
-        val (action, defaults) = parser.loginFields(login.html, login.url)
+        val (action, defaults) = offMain { parser.loginFields(login.html, login.url) }
         val result = raw(action, defaults + mapOf("pwuser" to username, "pwpwd" to password))
         val home = fetch("index.php")
-        require(home.authenticated) { parser.responseMessage(parser.document(result.html, result.url)).ifBlank { "登录未成功，请检查账号，或使用网页完成验证码" } }
+        val failureMessage = offMain { parser.responseMessage(parser.document(result.html, result.url)) }
+        require(home.authenticated) { failureMessage.ifBlank { "登录未成功，请检查账号，或使用网页完成验证码" } }
         return home
     }
 
     override suspend fun search(keyword: String, author: String): PageData {
         val page = raw("index.php")
-        val doc = parser.document(page.html, page.url)
-        val form = doc.select("form").firstOrNull { it.attr("action").startsWith("search.php") && parser.controls(it).any { e -> e.attr("name") == "keyword" } }
-            ?: error("未找到搜索表单，请使用网页搜索")
-        val action = parser.resolve(form.attr("action"), page.url) ?: error("搜索地址无效")
-        val fields = parser.formFields(form) + mapOf("keyword" to keyword, "pwuser" to author)
-        val result = raw(action, fields)
-        val resultDoc = parser.document(result.html, result.url)
-        val target = parser.refreshTarget(resultDoc)
-        return if (target != null) fetch(target) else parser.parse(result.html, result.url)
+        val (searchAction, searchFields) = offMain {
+            val doc = parser.document(page.html, page.url)
+            val form = doc.select("form").firstOrNull {
+                it.attr("action").startsWith("search.php") && parser.controls(it).any { e -> e.attr("name") == "keyword" }
+            } ?: error("未找到搜索表单，请使用网页搜索")
+            val action = parser.resolve(form.attr("action"), page.url) ?: error("搜索地址无效")
+            action to (parser.formFields(form) + mapOf("keyword" to keyword, "pwuser" to author))
+        }
+        val result = raw(searchAction, searchFields)
+        val target = offMain { parser.refreshTarget(parser.document(result.html, result.url)) }
+        return if (target != null) fetch(target) else offMain { parser.parse(result.html, result.url) }
     }
 
     override suspend fun editor(url: String): EditorForm {
         val raw = raw(url)
-        val form = parser.parseEditor(raw.html, raw.url)
+        val form = offMain { parser.parseEditor(raw.html, raw.url) }
         val faces = try {
             val script = faceScript ?: raw("data/bbscache/face.js").html.also { faceScript = it }
-            parser.parseEmoticons(script, raw.html, raw.url)
+            offMain { parser.parseEmoticons(script, raw.html, raw.url) }
         } catch (e: CancellationException) { throw e }
         catch (_: Exception) { emptyList() }
         val fallback = listOf(57 to "高兴", 41 to "大笑", 44 to "锤地", 42 to "不语", 36 to "喝茶", 38 to "睡觉", 43 to "受伤")
@@ -270,13 +276,14 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         } else null
         val result = try {
             val raw = raw(form.action, form.fields + values)
-            val doc = parser.document(raw.html, raw.url)
-            val text = parser.responseMessage(doc)
-            val target = parser.refreshTarget(doc)
+            val (doc, text, target) = offMain {
+                val doc = parser.document(raw.html, raw.url)
+                Triple(doc, parser.responseMessage(doc), parser.refreshTarget(doc))
+            }
             val messageResult = if (pendingKey != null) {
                 val alreadySendbox = raw.url.contains("message.php") && raw.url.contains("action=sendbox")
                 val sendbox = try {
-                    if (alreadySendbox) parser.parse(raw.html, raw.url)
+                    if (alreadySendbox) offMain { parser.parse(raw.html, raw.url) }
                     else fetch("$origin/message.php?action=sendbox")
                 } catch (e: CancellationException) { throw e
                 } catch (_: Exception) { null }
@@ -323,9 +330,10 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
         require(sameOrigin(form.action)) { "提交域名不匹配" }
         return try {
             val response = raw(form.action, followRedirects = false, referer = form.sourceUrl, customBody = nativeMultipart(fields, parts))
-            val doc = parser.document(response.html, response.url)
-            val message = parser.responseMessage(doc)
-            val target = response.redirectUrl ?: parser.refreshTarget(doc)
+            val (doc, message, target) = offMain {
+                val doc = parser.document(response.html, response.url)
+                Triple(doc, parser.responseMessage(doc), response.redirectUrl ?: parser.refreshTarget(doc))
+            }
             when {
                 target != null && destination(target).effect == SiteEffect.READ -> SubmitResult.Success(target, "站点已接收提交，请核对发布结果")
                 doc.select("textarea").isNotEmpty() -> SubmitResult.Rejected(message.ifBlank { "站点未接受本次提交" })
@@ -387,14 +395,15 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
     private suspend fun performNativeChange(url: String, source: String, body: okhttp3.RequestBody?): SiteActionResult {
         return try {
             val raw = raw(url, followRedirects = false, referer = source, customBody = body)
-            val doc = parser.document(raw.html, raw.url)
-            val target = raw.redirectUrl ?: parser.refreshTarget(doc)
-            val notice = parser.responseMessage(doc)
+            val (doc, target, notice) = offMain {
+                val doc = parser.document(raw.html, raw.url)
+                Triple(doc, raw.redirectUrl ?: parser.refreshTarget(doc), parser.responseMessage(doc))
+            }
             if (target == null && hasExplicitMutationRejection(notice)) {
                 return SiteActionResult.Rejected(notice.take(240))
             }
             val page = if (target != null && destination(target).effect == SiteEffect.READ) fetch(target)
-            else parser.parse(raw.html, raw.url)
+            else offMain { parser.parse(raw.html, raw.url) }
             SiteActionResult.Response(
                 page,
                 uncertainReceipt = "服务器已返回页面，但尚未验证操作的最终状态；请检查当前列表或状态后再决定是否重试。",
@@ -778,20 +787,25 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
             // A quote/readback must never follow a redirect into a transaction.
             val page = raw(url, followRedirects = false)
             require(page.redirectUrl == null) { "帖子发生跳转，请重新打开后核对登录和购买信息" }
-            parser.parse(page.html, page.url)
+            offMain { parser.parse(page.html, page.url) }
         }, transact = { fresh ->
             // The site's button performs a state-changing GET. Never replay it
             // or follow its redirects; read back the original thread instead.
             val result = raw(fresh.actionUrl, followRedirects = false, referer = fresh.threadUrl)
-            val doc = parser.document(result.html, result.url)
-            val accepted = result.redirectUrl != null || parser.refreshTarget(doc) != null
-            val message = parser.responseMessage(doc)
+            val (accepted, message) = offMain {
+                val doc = parser.document(result.html, result.url)
+                (result.redirectUrl != null || parser.refreshTarget(doc) != null) to parser.responseMessage(doc)
+            }
             PurchaseReceipt(if (accepted) null else message.ifBlank { "站点拒绝了此次购买" })
         }).purchase(offer)
     }
 
     suspend fun imageBytes(url: String): ByteArray? = withContext(Dispatchers.IO) {
         var target = resolve(url)
+        // The first request already carries the session cookie, so it must be a
+        // read-only target too. Post bodies may contain arbitrary same-origin
+        // <img src> URLs that are fetched automatically.
+        if (destination(target).effect !in listOf(SiteEffect.READ, SiteEffect.DOWNLOAD)) return@withContext null
         repeat(5) {
             execute(Request.Builder().url(target).header("Referer", "$origin/").build(), 1).use { response ->
                 if (response.code in listOf(301, 302, 303, 307, 308)) {
@@ -809,6 +823,9 @@ class HttpForumService(override val origin: String, private val store: KeyValueS
 
     suspend fun download(url: String, output: java.io.OutputStream) = withContext(Dispatchers.IO) {
         var target = resolve(url)
+        require(destination(target).effect in listOf(SiteEffect.READ, SiteEffect.DOWNLOAD)) {
+            "下载目标不是只读资源，已停止"
+        }
         repeat(6) {
             client.newCall(Request.Builder().url(target).header("Referer", "$origin/").build()).execute().use { response ->
                 if (response.code in listOf(301, 302, 303, 307, 308)) {

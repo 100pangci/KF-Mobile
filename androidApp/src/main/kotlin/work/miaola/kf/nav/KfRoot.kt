@@ -34,6 +34,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import work.miaola.kf.*
 import work.miaola.kf.AppController
 import work.miaola.kf.HomeTab
 import work.miaola.kf.PageData
@@ -320,6 +321,7 @@ private fun KfRootForServer(
                             title = title,
                             root = location.kind.isTopLevel,
                             showBack = canGoBack,
+                            editor = location.kind == KfDestinationKind.EDITOR,
                             kind = location.kind,
                             c = c,
                             page = page,
@@ -526,61 +528,4 @@ private fun KfNativeDestination(
 @Composable
 private fun KfLoading(c: AppController, message: String = "正在连接绯月…", onRetry: () -> Unit) {
     KfPageLoadState(c.busy || c.loadingEditor, c.error, onRetry, message)
-}
-
-@Composable
-private fun KfTopBar(
-    title: String,
-    root: Boolean,
-    showBack: Boolean,
-    kind: KfDestinationKind,
-    c: AppController,
-    page: PageData?,
-    actions: KfActions,
-    onBack: () -> Unit,
-    onRefresh: () -> Unit,
-) {
-    TopAppBar(
-        title = {
-            Column {
-                Crossfade(
-                    targetState = title,
-                    animationSpec = tween(KfMotionSpec.Quick),
-                    label = "topBarTitle",
-                ) { value ->
-                    Text(value, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                if (root) Text("SCARLET MOON", style = MaterialTheme.typography.labelSmall, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.primary)
-            }
-        },
-        navigationIcon = {
-            if (kind == KfDestinationKind.EDITOR) TextButton(onClick = onBack) { Text("取消") }
-            else if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-            else Icon(Icons.Default.NightsStay, null, Modifier.padding(start = 20.dp, end = 8.dp), tint = MaterialTheme.colorScheme.primary)
-        },
-        actions = {
-            KfPageActions(c, kind, page, actions, onRefresh)
-        },
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-    )
-}
-
-@Composable
-private fun KfBottomBar(kind: KfDestinationKind, actions: KfActions) {
-    val tabs = listOf(
-        Triple(HomeTab.FEED, Icons.Default.Explore, KfDestinationKind.FEED),
-        Triple(HomeTab.BOARDS, Icons.Default.Dashboard, KfDestinationKind.BOARDS),
-        Triple(HomeTab.MESSAGES, Icons.Default.MailOutline, KfDestinationKind.MESSAGES),
-        Triple(HomeTab.ACCOUNT, Icons.Default.PersonOutline, KfDestinationKind.ACCOUNT),
-    )
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-        tabs.forEach { (tab, icon, tabKind) ->
-            NavigationBarItem(
-                selected = kind == tabKind,
-                onClick = { actions.selectTab(tab) },
-                icon = { Icon(icon, tab.title) },
-                label = { Text(tab.title) },
-            )
-        }
-    }
 }

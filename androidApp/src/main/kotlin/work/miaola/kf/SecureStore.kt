@@ -43,7 +43,9 @@ class SecureStore(context: Context) : KeyValueStore {
         cipher.init(Cipher.ENCRYPT_MODE, key())
         cipher.updateAAD(key.toByteArray(Charsets.UTF_8))
         val bytes = cipher.iv + cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-        check(prefs.edit().putString(key, Base64.encodeToString(bytes, Base64.NO_WRAP)).commit()) { "无法保存本机会话" }
+        // apply() updates the in-memory value immediately and flushes to disk
+        // asynchronously; commit() was blocking the UI thread on every write.
+        prefs.edit().putString(key, Base64.encodeToString(bytes, Base64.NO_WRAP)).apply()
     }
 
     override fun remove(key: String) { prefs.edit().remove(key).apply() }

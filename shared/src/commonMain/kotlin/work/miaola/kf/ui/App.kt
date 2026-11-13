@@ -44,6 +44,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -58,144 +59,6 @@ import work.miaola.kf.*
 
 typealias RichContent = @Composable (html: String, origin: String, fontScale: Float, onLink: (String) -> Unit, onImage: (String, List<String>) -> Unit) -> Unit
 typealias ForumImage = @Composable (url: String, label: String, modifier: Modifier) -> Unit
-
-@Composable
-fun KfApp(c: AppController, forumImage: ForumImage = { _, label, modifier -> Box(modifier, contentAlignment = Alignment.Center) { Text(label, style = MaterialTheme.typography.labelSmall) } }, forumAvatar: ForumImage = forumImage, richContent: RichContent) {
-    KfTheme(c.theme) {
-        val snack = remember { SnackbarHostState() }
-        var search by remember { mutableStateOf(false) }
-        var logout by remember { mutableStateOf(false) }
-        val savedScreens = rememberSaveableStateHolder()
-        val actions = remember(c) {
-            KfActions(
-                open = c::navigate,
-                openSettings = { c.showSettings = true },
-                openLogin = { c.showLogin = true },
-                openSearch = { search = true },
-                openNative = { url ->
-                    when {
-                        url == c.page?.url -> c.showSiteTools = true
-                        url.substringBefore('?').endsWith("login.php") -> c.openNativeLoginOptions()
-                        else -> c.openBrowser(url)
-                    }
-                },
-                selectTab = c::selectTab,
-                back = { if (search) search = false else c.requestBack() },
-            )
-        }
-        KfOperationFeedback(c, snack, c.page != null || c.editor != null)
-        val isOverlay = search || c.showSettings || c.showLogin || c.editor != null
-        val nativeTitle = c.page?.nativePage?.title?.takeIf { c.showSiteTools || isNativeSitePage(c.page) || c.page?.nativePage?.favorites != null }
-        val readerTitle = c.page?.takeIf { it.posts.isNotEmpty() }?.title
-        val detailDestination = c.showSiteTools || isNativeSitePage(c.page) || c.page?.nativePage?.favorites != null ||
-            c.page?.posts?.isNotEmpty() == true ||
-            c.page?.url?.substringBefore('?')?.endsWith("thread.php") == true ||
-            c.page?.url?.substringBefore('?')?.endsWith("search.php") == true ||
-            c.page?.url?.contains("action=read") == true
-        val showBottomBar = !isOverlay && !detailDestination
-        Scaffold(
-            topBar = {
-                if (!search) {
-                TopAppBar(
-                    title = {
-                        Column {
-                            Text(when {
-                                c.showSettings -> "偏好与连接"
-                                c.showSiteTools -> nativeTitle ?: "更多功能"
-                                c.showLogin -> "登录绯月"
-                                c.editor != null -> "写点什么"
-                                nativeTitle != null -> nativeTitle
-                                readerTitle != null -> readerTitle
-                                else -> "绯月"
-                            }, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            if (!isOverlay && nativeTitle == null && readerTitle == null) Text("SCARLET MOON", style = MaterialTheme.typography.labelSmall, letterSpacing = 2.sp, color = MaterialTheme.colorScheme.primary)
-                        }
-                    },
-                    navigationIcon = {
-                        if (c.editor != null) TextButton(onClick = actions.back) { Text("取消") }
-                        else if (c.canBack) IconButton(onClick = actions.back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-                        else Icon(Icons.Default.NightsStay, null, Modifier.padding(start = 20.dp, end = 8.dp), tint = MaterialTheme.colorScheme.primary)
-                    },
-                    actions = {
-                        val kind = when {
-                            c.editor != null -> KfDestinationKind.EDITOR
-                            c.showSettings -> KfDestinationKind.SETTINGS
-                            c.showLogin -> KfDestinationKind.LOGIN
-                            detailDestination -> KfDestinations.fromUrl(c.page?.url.orEmpty())
-                            c.tab == HomeTab.ACCOUNT -> KfDestinationKind.ACCOUNT
-                            c.tab == HomeTab.MESSAGES -> KfDestinationKind.MESSAGES
-                            c.tab == HomeTab.BOARDS -> KfDestinationKind.BOARDS
-                            else -> KfDestinationKind.FEED
-                        }
-                        KfPageActions(c, kind, c.page, actions) { c.page?.let(c::refreshTimeline) }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-                )
-                }
-            },
-            bottomBar = {
-                if (showBottomBar) NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-                    HomeTab.entries.forEach { tab ->
-                        NavigationBarItem(selected = c.tab == tab, onClick = { actions.selectTab(tab) },
-                            icon = { Icon(tabIcon(tab), tab.title) }, label = { Text(tab.title) })
-                    }
-                }
-            },
-            floatingActionButton = {
-                if (!isOverlay && c.page?.composeUrl != null && (c.page?.posts?.isNotEmpty() == true ||
-                    c.page?.url?.substringBefore('?')?.endsWith("thread.php") == true ||
-                    c.page?.url?.let { it.substringBefore('?').endsWith("message.php") && !it.contains("action=read") && !it.contains("action=banned") && !it.contains("action=scout") } == true)) ExtendedFloatingActionButton(
-                    onClick = { c.page?.composeUrl?.let(actions.open) },
-                    icon = { Icon(Icons.Default.Edit, null) },
-                    text = { Text(if (c.page?.posts?.isNotEmpty() == true) "回复" else if (c.tab == HomeTab.MESSAGES || c.page?.url?.contains("message.php") == true) "写私信" else "发主题") },
-                )
-            },
-            snackbarHost = { SnackbarHost(snack) },
-        ) { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background)) {
-                KfStatusBanners(c)
-                val screenKey = if (search) "${c.origin}|search" else "${c.origin}|${c.tab}|${c.page?.url}|${c.showSettings}|${c.showLogin}|${c.editor?.sourceUrl}"
-                 savedScreens.SaveableStateProvider(screenKey) { when {
-                    search -> SearchScreen(c, actions)
-                    c.showSettings -> SettingsScreen(c)
-                    c.showSiteTools -> NativeSiteScreen(c, c.page, actions, richContent, forumImage, forumAvatar)
-                    c.showLogin -> LoginScreen(c, actions)
-                    c.editor != null -> EditorScreen(c, forumImage)
-                    c.tab == HomeTab.ACCOUNT && (c.page == c.home || c.page == null) -> AccountScreen(c, actions, forumAvatar, onLogout = { logout = true })
-                    isNativeSitePage(c.page) -> NativeSiteScreen(c, c.page, actions, richContent, forumImage, forumAvatar)
-                    c.page?.posts?.isNotEmpty() == true -> ReaderScreen(c, actions, c.page, forumAvatar, richContent, showTitle = false)
-                    c.page?.url?.substringBefore('?')?.endsWith("thread.php") == true -> ListingScreen(c, actions, c.page, isMessages = false, rich = richContent)
-                    c.page?.url?.substringBefore('?')?.endsWith("profile.php") == true -> ListingScreen(c, actions, c.page, isMessages = false, rich = richContent)
-                    c.page?.url?.substringBefore('?')?.endsWith("search.php") == true -> ListingScreen(c, actions, c.page, isMessages = false)
-                    c.page?.url?.substringBefore('?')?.endsWith("message.php") == true -> ListingScreen(c, actions, c.page, isMessages = true, rich = richContent)
-                    c.tab == HomeTab.BOARDS -> BoardsScreen(c, actions, c.home ?: c.page)
-                    c.tab == HomeTab.MESSAGES -> ListingScreen(c, actions, c.page, isMessages = true, rich = richContent)
-                    else -> FeedScreen(c, actions, c.page)
-                } }
-            }
-        }
-        KfGlobalDialogs(c, logout = logout, onLogoutChange = { logout = it })
-    }
-}
-
-private fun isNativeSitePage(page: PageData?): Boolean {
-    val url = page?.url ?: return false
-    val path = url.substringBefore('?').substringAfterLast('/')
-    return when (path) {
-        "index.php", "read.php", "search.php" -> false
-        "message.php" -> url.contains("action=read") || url.contains("action=banned") || url.contains("action=scout")
-        "profile.php" -> !url.contains("action=favor")
-        "thread.php" -> false
-        else -> page.nativePage != null
-    }
-}
-
-private fun tabIcon(tab: HomeTab): ImageVector = when (tab) {
-    HomeTab.FEED -> Icons.Default.Explore
-    HomeTab.BOARDS -> Icons.Default.Dashboard
-    HomeTab.MESSAGES -> Icons.Default.MailOutline
-    HomeTab.ACCOUNT -> Icons.Default.PersonOutline
-}
 
 @Composable
 fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
@@ -529,7 +392,7 @@ fun ReaderScreen(c: AppController, actions: KfActions, page: PageData?, forumAva
                 Column(Modifier.padding(horizontal = 2.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val avatar = post.avatar.ifBlank { c.avatarFor(post.authorUrl).orEmpty() }
-                        LaunchedEffect(post.authorUrl) { c.loadAvatar(post.authorUrl) }
+                        LaunchedEffect(post.authorUrl) { if (post.avatar.isBlank()) c.loadAvatar(post.authorUrl) }
                         Surface(Modifier.size(44.dp).clickable(enabled = post.authorUrl.isNotEmpty()) { actions.open(post.authorUrl) }, shape = CircleShape,
                             color = MaterialTheme.colorScheme.secondaryContainer,
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))) {
@@ -619,8 +482,15 @@ private fun PostQuote(post: ForumPost, c: AppController, actions: KfActions, ric
                     richContent(reply.html, c.origin, c.fontScale, actions.open, c::showImages)
                 }
                 reply.targetUrl?.takeIf { it.isNotBlank() }?.let { target ->
-                    Text("查看原楼层", Modifier.padding(top = 4.dp).clickable { actions.open(target) },
-                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    // A button keeps the 48dp touch target and button semantics
+                    // that a bare clickable Text loses.
+                    TextButton(
+                        onClick = { actions.open(target) },
+                        modifier = Modifier.padding(top = 4.dp),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
+                    ) {
+                        Text("查看原楼层", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
         }
@@ -1010,7 +880,13 @@ fun SettingsScreen(c: AppController) {
         }
         item {
             ListItem(headlineContent = { Text("阅读字号") }, trailingContent = { Text("${(c.fontScale * 100).toInt()}%") })
-            Slider(value = c.fontScale, onValueChange = c::updateFontScale, valueRange = 0.85f..1.4f, steps = 10)
+            Slider(
+                value = c.fontScale,
+                onValueChange = c::updateFontScale,
+                onValueChangeFinished = c::commitFontScale,
+                valueRange = 0.85f..1.4f,
+                steps = 10,
+            )
         }
         item { HorizontalDivider() }
         item { KfSectionTitle("连接", icon = Icons.Default.Public) }
@@ -1115,7 +991,9 @@ fun EditorScreen(c: AppController, forumImage: ForumImage) {
                         IconButton(onClick = { focusBody = true; focusManager.clearFocus(); keyboard?.hide(); c.showEmoticonPicker = true }, enabled = !c.busy) { Icon(Icons.Default.InsertEmoticon, "表情") }
                     }
                 }
-                TextField(body, { body = it; c.updateDraftContent(it.text) }, Modifier.fillMaxWidth().padding(top = KfSpacing.Sm).heightIn(min = 250.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
+                // Bound the height: an unbounded TextField inside LazyColumn
+                // grows with the draft and scrolls its own focus out of view.
+                TextField(body, { body = it; c.updateDraftContent(it.text) }, Modifier.fillMaxWidth().padding(top = KfSpacing.Sm).heightIn(min = 250.dp, max = 420.dp).focusRequester(bodyFocus), placeholder = { Text("写下你的想法…") }, enabled = !c.busy, minLines = 9,
                     shape = KfFieldShape,
                     colors = TextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,

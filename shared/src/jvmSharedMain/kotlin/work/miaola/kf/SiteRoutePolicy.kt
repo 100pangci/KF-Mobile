@@ -19,8 +19,14 @@ class SiteRoutePolicy(private val origin: String) {
         val rootEndpoint = url.encodedPath == "/$path"
         val effect = when {
             path.substringAfterLast('.', "").lowercase() in listOf("gif", "png", "jpg", "jpeg", "webp", "avif", "bmp", "svg") -> SiteEffect.READ
-            path == "job.php" && action == "buytopic" -> SiteEffect.UNSUPPORTED
-            path == "job.php" && action in listOf("download", "downloadatt") -> SiteEffect.DOWNLOAD
+            // OkHttp returns the first duplicate query value while PHP uses the
+            // last one. Requiring a single value prevents a request such as
+            // action=download&action=buytopic from being classified as a download
+            // and then executed as a purchase by the server.
+            path == "job.php" && action == "buytopic" && only("action", "tid", "pid", "verify") -> SiteEffect.UNSUPPORTED
+            path == "job.php" && action in listOf("download", "downloadatt") &&
+                only("action", "aid", "tid", "pid", "uid", "filename") -> SiteEffect.DOWNLOAD
+            path == "job.php" -> SiteEffect.UNSUPPORTED
             !rootEndpoint && path.isNotEmpty() -> SiteEffect.CHANGE
             path == "index.php" && only() -> SiteEffect.READ
             path == "thread.php" && only("fid", "page", "type", "search", "orderway", "asc", "digest") -> SiteEffect.READ
