@@ -87,7 +87,10 @@ fun NativeRichText(html: String, origin: String, fontScale: Float, onLink: (Stri
     val imageClick by rememberUpdatedState(onImage)
     val color = MaterialTheme.colorScheme.onSurface.toArgb()
     val linkColor = MaterialTheme.colorScheme.primary.toArgb()
-    val maxWidth = (LocalWindowInfo.current.containerSize.width - with(LocalDensity.current) { 64.dp.roundToPx() }).coerceAtLeast(160)
+    // Reserve the reading column the surrounding screen actually gives us:
+    // the shared reader/list screens use a 16dp gutter plus a 2dp inner pad.
+    // A hardcoded 64dp under-measured and let wide images overflow the column.
+    val maxWidth = (LocalWindowInfo.current.containerSize.width - with(LocalDensity.current) { 40.dp.roundToPx() }).coerceAtLeast(160)
     val density = LocalDensity.current
     var layoutVersion by remember { mutableIntStateOf(0) }
     AndroidView(

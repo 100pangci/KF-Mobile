@@ -52,6 +52,8 @@ object KfSpacing {
     val ScreenGutter = 16.dp
     val ListBottom = 32.dp
     val FabBottom = 96.dp
+    /** Elevated batch/submit bar pinned under the list. */
+    val BulkBar = 120.dp
 }
 
 /** Content motion shared by common screens; navigation motion stays in KfMotion. */

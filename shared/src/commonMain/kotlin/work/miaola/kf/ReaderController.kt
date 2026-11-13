@@ -27,12 +27,12 @@ internal fun AppController.clearNativeTransientState() {
         showTopicFilters = false
         dailyStatusJob?.cancel(); dailyStatusJob = null
         dailyBusy = false
-        filePickerRequest = null; formFiles = emptyMap(); editorFiles = emptyList(); gallery = null
+        filePickerRequest = null; formFiles = emptyMap(); editorFiles = emptyList(); gallery = null; galleryNotice = null
     }
 
 fun AppController.presentNativePage(result: PageData) {
         rememberNavigationSource(); page = result; rememberCachedPage(result, allowLoginWall = true); showSiteTools = true
-        pendingNativePage = result.url; gallery = null
+        pendingNativePage = result.url; gallery = null; galleryNotice = null
         if (result.authStatus == AuthStatus.LOGIN_REQUIRED) home = home?.copy(authenticated = false, authStatus = AuthStatus.LOGIN_REQUIRED)
     }
 
@@ -40,7 +40,7 @@ fun AppController.presentNativePage(result: PageData) {
 fun AppController.recoverManagement(source: String) {
         val target = managementRecoveryFor(source) ?: return
         if (busy || siteBusy || purchaseBusy || resolve(target).effect != SiteEffect.READ) return
-        work { current ->
+        work(loadsPage = true) { current ->
             val fresh = service.fetch(target)
             if (!current() || handleTimelineLogin(fresh, target)) return@work
             require(validManagementReadback(target, fresh)) { "未获取到可核对的列表，请重新加载来源信箱或收藏分类" }
@@ -183,7 +183,7 @@ fun AppController.ensureSearchResult(url: String) {
         val destination = resolve(url)
         if (!KfDestinations.isSearchNavigation(destination.url) ||
             !destination.url.startsWith("$origin/search.php?")) return
-        work {
+        work(loadsPage = true) {
             val result = service.fetch(destination.url)
             if (!it()) return@work
             if (!handleTimelineLogin(result, url)) rememberCachedPage(result, url)
@@ -201,7 +201,7 @@ fun AppController.search(keyword: String, author: String = "", cacheKey: String?
         if (keyword.isBlank() && author.isBlank()) return
         lastSearchKeyword = keyword.trim(); lastSearchAuthor = author.trim()
         if (push) rememberNavigationSource()
-        work {
+        work(loadsPage = true) {
             val result = service.search(keyword.trim(), author.trim())
             if (!it()) return@work
             if (handleTimelineLogin(result, page?.url ?: "index.php")) return@work
@@ -365,7 +365,7 @@ fun AppController.load(url: String = page?.url ?: "index.php", push: Boolean = t
         if (route.effect != SiteEffect.READ) { openSiteDestination(route); return }
         if (push) rememberNavigationSource()
         loadingUrl = url
-        work {
+        work(loadsPage = true) {
             val result = service.fetch(url)
             if (!it()) return@work
             refreshPurchaseState(result)

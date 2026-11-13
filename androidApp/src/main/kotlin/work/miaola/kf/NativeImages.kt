@@ -90,12 +90,23 @@ internal fun decodeForumDrawable(context: Context, bytes: ByteArray): Drawable? 
 }
 
 @Composable
-fun NativeForumImage(origin: String, url: String, description: String, modifier: Modifier, contentScale: ContentScale = ContentScale.Fit, cache: LruCache<String, Bitmap>? = null) {
+fun NativeForumImage(
+    origin: String,
+    url: String,
+    description: String,
+    modifier: Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+    cache: LruCache<String, Bitmap>? = null,
+    showRetry: Boolean = false,
+) {
     val context = LocalContext.current
     val key = "$origin@$url"
     var bitmap by remember(origin, url) { mutableStateOf(cache?.get(key)) }
-    LaunchedEffect(origin, url) {
+    var attempt by remember(origin, url) { mutableIntStateOf(0) }
+    var failed by remember(origin, url) { mutableStateOf(false) }
+    LaunchedEffect(origin, url, attempt) {
         if (bitmap != null) return@LaunchedEffect
+        failed = false
         val loaded = withContext(Dispatchers.IO) {
             try { forumImageBytes(context, origin, url)?.let(::decodeForumBitmap) }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
@@ -104,7 +115,7 @@ fun NativeForumImage(origin: String, url: String, description: String, modifier:
         if (loaded != null) {
             cache?.put(key, loaded)
             bitmap = loaded
-        }
+        } else failed = true
     }
     val value = bitmap
     if (value != null) {
@@ -112,7 +123,15 @@ fun NativeForumImage(origin: String, url: String, description: String, modifier:
         LaunchedEffect(value) { alpha.animateTo(1f, tween(180)) }
         Image(value.asImageBitmap(), description, modifier.alpha(alpha.value), contentScale = contentScale)
     } else androidx.compose.foundation.layout.Box(modifier, contentAlignment = androidx.compose.ui.Alignment.Center) {
-        Text(description, maxLines = 2)
+        // A bare label looked identical to a successfully loaded placeholder.
+        // Inline images are real content, so say it failed and allow a retry.
+        androidx.compose.foundation.layout.Column(
+            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+        ) {
+            Text(if (failed) "图片加载失败" else description.ifBlank { "正在加载图片" }, maxLines = 2)
+            if (failed && showRetry) androidx.compose.material3.TextButton(onClick = { attempt++ }) { Text("重试") }
+        }
     }
 }
 

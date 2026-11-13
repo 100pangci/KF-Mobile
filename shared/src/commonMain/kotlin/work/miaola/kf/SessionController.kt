@@ -32,7 +32,7 @@ fun AppController.logout() {
 
 fun AppController.openNativeLoginOptions() {
         rememberNavigationSource()
-        work {
+        work(loadsPage = true) {
             val result = service.fetch("login.php")
             if (!it()) return@work
             page = result; rememberCachedPage(result, "login.php")
@@ -43,7 +43,17 @@ fun AppController.openNativeLoginOptions() {
 fun AppController.refreshCatalog(url: String = configUrl) {
         configUrl = url.trim(); store.put("config_url", configUrl)
         catalogJob?.cancel()
-        catalogJob = scope.launch { catalog = domains.refresh(configUrl) }
+        val version = ++catalogRefreshVersion
+        catalogBusy = true
+        catalogJob = scope.launch {
+            try {
+                val result = domains.refresh(configUrl)
+                catalog = result
+                if (url.isNotBlank()) toast = result.warning ?: "配置已更新（${result.source.label}）"
+            } finally {
+                if (version == catalogRefreshVersion) catalogBusy = false
+            }
+        }
     }
 
 fun AppController.switchDomain(value: String) {
@@ -113,7 +123,7 @@ fun AppController.resumeSession() {
 fun AppController.login(username: String, password: String) {
         if (busy) return
         if (username.isBlank() || password.isEmpty()) { error = "请输入用户名和密码"; return }
-        work {
+        work(loadsPage = true) {
             val result = service.login(username.trim(), password)
             if (!it()) return@work
             val destination = loginReturnUrl

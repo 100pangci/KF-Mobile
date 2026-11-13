@@ -247,7 +247,11 @@ private fun KfRootForServer(
         fun back() {
             when (location.kind) {
                 KfDestinationKind.EDITOR -> {
-                    if (c.busy && !c.loadingEditor) return
+                    if (c.busy && !c.loadingEditor) {
+                        // Sending is not cancelable; say so instead of ignoring the tap.
+                        c.reportPlatformResult("正在提交，请等待结果返回", true)
+                        return
+                    }
                     if (c.loadingEditor) {
                         c.requestBack()
                         nav.popBackStack()
@@ -347,7 +351,7 @@ private fun KfRootForServer(
                 },
                 floatingActionButton = {
                     val composeUrl = page?.composeUrl
-                    if (composeUrl != null && location.kind in setOf(KfDestinationKind.LISTING, KfDestinationKind.READER, KfDestinationKind.MESSAGES)) ExtendedFloatingActionButton(
+                    if (!c.managementActive && composeUrl != null && location.kind in setOf(KfDestinationKind.LISTING, KfDestinationKind.READER, KfDestinationKind.MESSAGES)) ExtendedFloatingActionButton(
                         onClick = { open(composeUrl) },
                         icon = { Icon(Icons.Default.Edit, null) },
                         text = {
@@ -387,7 +391,7 @@ private fun KfRootForServer(
                         }
                         composable(KfRoutes.ACCOUNT) {
                             LaunchedEffect(Unit) { if (c.home == null) c.ensurePage("index.php"); c.refreshAccountAvatar() }
-                            AccountScreen(c, actions, forumAvatar, onLogout = { logout = true })
+                            AccountScreen(c, actions, forumAvatar, onLogout = { logout = true }, appVersion = BuildConfig.VERSION_NAME)
                         }
                         composable(KfRoutes.SETTINGS) {
                             DisposableEffect(Unit) { onDispose { c.showSettings = false } }
@@ -527,5 +531,5 @@ private fun KfNativeDestination(
 
 @Composable
 private fun KfLoading(c: AppController, message: String = "正在连接绯月…", onRetry: () -> Unit) {
-    KfPageLoadState(c.busy || c.loadingEditor, c.error, onRetry, message)
+    KfPageLoadState(c.busy || c.loadingEditor, c.pageError, onRetry, message)
 }

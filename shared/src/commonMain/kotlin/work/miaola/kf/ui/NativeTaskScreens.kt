@@ -96,7 +96,7 @@ internal fun nativeTaskUsesPullToRefresh(page: PageData?): Boolean = when (nativ
 @Composable
 private fun MessageDetailScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val message = native.message ?: return
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(KfSpacing.Sm)) {
                 if (message.title.isNotBlank() && message.title != native.title) {
@@ -139,7 +139,7 @@ private fun BlocklistScreen(c: AppController, native: NativeSitePage, actions: K
     val form = native.forms.firstOrNull { it.id == model.formId } ?: return
     val field = form.fields.firstOrNull { it.id == model.fieldId } ?: return
     val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
-    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
+    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         item { ManagementRecovery(c, form.sourceUrl) }
         item { if (native.title.isBlank() || native.title != "屏蔽名单") KfSectionTitle("屏蔽名单", icon = Icons.Default.Block) }
         // Keep the site's exact text syntax. No guessed UID/name conversion.
@@ -160,7 +160,7 @@ private fun StatusTimelineScreen(c: AppController, page: PageData, native: Nativ
     val state = rememberLazyListState()
     val interactions = ListInteractions(c, state, page)
     RefreshableList(interactions, { c.refreshTimeline(page) }) {
-        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom)) {
+        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom)) {
             item {
                 TaskHeading(
                     timeline.label,
@@ -257,7 +257,7 @@ private fun TaskHeading(title: String, native: NativeSitePage, subtitle: String?
 @Composable
 private fun BankLogScreen(c: AppController, native: NativeSitePage, actions: KfActions) {
     val log = native.bankLog ?: return
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom),
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom),
         verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         item {
             TaskHeading(
@@ -321,7 +321,7 @@ private fun BankLogScreen(c: AppController, native: NativeSitePage, actions: KfA
 
 @Composable
 private fun RewardScreen(c: AppController, page: PageData, native: NativeSitePage, actions: KfActions, rich: RichContent) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom),
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom),
         verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         item {
             TaskHeading(
@@ -355,7 +355,7 @@ private fun RewardScreen(c: AppController, page: PageData, native: NativeSitePag
 private fun ProgressScreen(c: AppController, page: PageData, actions: KfActions, rich: RichContent) {
     val native = page.nativePage ?: return
     val progress = native.progress ?: return
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
         if (progress.stats.isNotEmpty()) item {
             KfCard {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -414,7 +414,7 @@ private fun ProgressScreen(c: AppController, page: PageData, actions: KfActions,
 private fun ProfileScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent, avatar: ForumImage) {
     val profile = native.profile ?: return
     val details = profile.info.filterNot { it == profile.headline || it in profile.stats }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         item { KfCard {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
@@ -450,7 +450,7 @@ private fun ProfileScreen(c: AppController, native: NativeSitePage, actions: KfA
 private fun ProfileSettingsScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val form = native.forms.firstOrNull { it.actionUrl.contains("profile.php") } ?: native.forms.first()
     val values = remember(form) { mutableStateMapOf<String, List<String>>().apply { form.fields.forEach { put(it.id, it.initial) } } }
-    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
+    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         item {
             KfSectionTitle("头像")
             Text("使用 Android 照片选择器；图片会在本机裁剪为站点要求的尺寸，再走单独的 ajaxface 上传协议。",
@@ -522,7 +522,7 @@ private fun BankScreen(c: AppController, native: NativeSitePage, actions: KfActi
             }
         }
     }
-    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
+    LazyColumn(Modifier.fillMaxSize().imePadding(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
         if (bank.balances.isNotEmpty()) item {
             KfCard {
                 KfSectionTitle("账户", icon = Icons.Default.AccountBalance)
@@ -638,7 +638,7 @@ private fun RecordScreen(c: AppController, page: PageData, actions: KfActions, r
 @Composable
 private fun FaqScreen(c: AppController, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val blocks = native.blocks.ifEmpty { native.sections.map { NativeBlock.Section(it.title, it.html) } + native.tables.map { NativeBlock.Table(it) } }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.Xl, KfSpacing.Md, KfSpacing.Xl, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Md, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Lg)) {
         if (native.links.isNotEmpty()) item { TaskLinks(native.links, actions) }
         blocks.forEach { block -> when (block) {
             is NativeBlock.Section -> item {

@@ -59,7 +59,9 @@ fun SearchScreen(c: AppController, actions: KfActions, initialKeyword: String = 
         }
     }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // A search destination keeps the same top-app-bar height as every other
+        // screen so opening it does not jump the content.
+        Row(Modifier.fillMaxWidth().height(64.dp).padding(start = 4.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = actions.back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
             OutlinedTextField(keyword, { keyword = it }, Modifier.weight(1f).focusRequester(focus),
                 placeholder = { Text("搜索绯月") }, singleLine = true, shape = KfFieldShape,
@@ -68,14 +70,25 @@ fun SearchScreen(c: AppController, actions: KfActions, initialKeyword: String = 
                 trailingIcon = { IconButton(onClick = ::search, enabled = !c.busy) { Icon(Icons.Default.Search, "搜索") } })
             IconButton(onClick = { keyboard?.hide(); filters = true }) { Icon(Icons.Default.FilterList, "筛选") }
         }
-        if (submittedAuthor.isNotBlank()) Text("作者：$submittedAuthor", Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelMedium)
+        // The list below belongs to an earlier query; say which one.
+        val submittedLabel = listOfNotNull(
+            submittedKeyword.takeIf { it.isNotBlank() }?.let { "“$it”" },
+            submittedAuthor.takeIf { it.isNotBlank() }?.let { "作者 $it" },
+        ).joinToString(" · ")
+        val edited = submitted && (keyword.trim() != submittedKeyword || author.trim() != submittedAuthor)
+        if (submitted && submittedLabel.isNotBlank()) Text(
+            if (edited) "正在显示 $submittedLabel 的结果 · 按搜索更新" else "结果：$submittedLabel",
+            Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelMedium,
+            color = if (edited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         when {
             result != null -> key(key) { ListingScreen(c, actions, result, false, if (receipt.isBlank()) submittedKeyword to submittedAuthor else null) }
             submitted -> Box(Modifier.fillMaxSize()) {
                 if (c.busy || attemptedKey != key) KfSkeletonScreen(rows = 4)
                 else KfEmptyState(
                     icon = Icons.Default.CloudOff,
-                    title = c.error ?: "未能获取搜索结果",
+                    title = c.pageError ?: "未能获取搜索结果",
                     actionLabel = "重试",
                     onAction = { if (receipt.isNotBlank()) c.ensureSearchResult(receipt) else c.ensureSearch(key, submittedKeyword, submittedAuthor) },
                     modifier = Modifier.align(Alignment.Center).padding(top = 24.dp),

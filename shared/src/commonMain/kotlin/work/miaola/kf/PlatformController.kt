@@ -19,7 +19,7 @@ fun AppController.toggleBookmark() {
 fun AppController.showImages(selected: String, images: List<String>) {
         val list = images.filter { it.startsWith("https://") }.distinct().take(100)
         val usable = if (selected in list) list else listOf(selected).filter { it.startsWith("https://") }
-        if (usable.isNotEmpty()) gallery = ImageGallery(usable, usable.indexOf(selected).coerceAtLeast(0))
+        if (usable.isNotEmpty()) { galleryNotice = null; gallery = ImageGallery(usable, usable.indexOf(selected).coerceAtLeast(0)) }
     }
 
 fun AppController.receiveFiles(request: FilePickerRequest, files: List<LocalUpload>, failure: String? = null) {

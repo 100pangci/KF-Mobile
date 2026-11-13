@@ -5,7 +5,9 @@ package work.miaola.kf.ui
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Dashboard
@@ -15,7 +17,10 @@ import androidx.compose.material.icons.filled.NightsStay
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -48,14 +53,29 @@ fun KfTopBar(
                 Crossfade(targetState = title, animationSpec = tween(KfMotionSpec.Quick), label = "topBarTitle") { value ->
                     Text(value, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (root) Text("SCARLET MOON", style = MaterialTheme.typography.labelSmall,
-                    letterSpacing = 2.sp, color = MaterialTheme.colorScheme.primary)
+                // Always reserve the subtitle line: showing it only at the root
+                // made every push/pop shift the content by one line.
+                Text(
+                    if (root) "SCARLET MOON" else " ",
+                    style = MaterialTheme.typography.labelSmall,
+                    letterSpacing = 2.sp,
+                    color = if (root) MaterialTheme.colorScheme.primary else Color.Transparent,
+                )
             }
         },
         navigationIcon = {
-            if (editor) TextButton(onClick = onBack) { Text("取消") }
+            if (editor) TextButton(
+                onClick = onBack,
+                // Submitting is not cancelable; show that instead of a dead tap.
+                enabled = !c.busy || c.loadingEditor,
+            ) {
+                if (c.busy && !c.loadingEditor) Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Text(" 提交中")
+                } else Text("取消")
+            }
             else if (showBack) IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
-            else Icon(Icons.Default.NightsStay, null, Modifier.padding(start = 20.dp, end = 8.dp),
+            else Icon(Icons.Default.NightsStay, null, Modifier.padding(start = 20.dp, end = 8.dp).clearAndSetSemantics {},
                 tint = MaterialTheme.colorScheme.primary)
         },
         actions = { KfPageActions(c, kind, page, actions, onRefresh) },

@@ -333,6 +333,32 @@ class AppControllerTest {
         c.close()
     }
 
+    @Test fun repeatedOperationErrorAdvancesRevisionAndConsumesCurrentMessage() = runTest {
+        val c = AppController(MemoryStore(), DemoFactory(), backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        c.reportPlatformResult("保存失败", failed = true)
+        assertEquals("保存失败", c.error)
+        val first = c.errorRevision
+        c.consumeError(first)
+        assertNull(c.error)
+        c.reportPlatformResult("保存失败", failed = true)
+        assertEquals("保存失败", c.error)
+        assertEquals(first + 1, c.errorRevision)
+        c.consumeError(first)
+        assertEquals("保存失败", c.error)
+        c.consumeError(first + 1)
+        assertNull(c.error)
+        c.close()
+    }
+
+    @Test fun platformFailureLeavesPageLoadErrorUntouched() = runTest {
+        val c = AppController(MemoryStore(), DemoFactory(), backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        c.reportPlatformResult("保存失败", failed = true)
+        assertNull(c.pageError)
+        c.close()
+    }
+
     @Test fun uncertainSiteActionReportsButStaysUsable() = runTest {
         val factory = DemoFactory()
         val c = AppController(MemoryStore(), factory, backgroundScope, browser = { _, _ -> })

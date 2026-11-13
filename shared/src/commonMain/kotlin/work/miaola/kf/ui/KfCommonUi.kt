@@ -49,12 +49,22 @@ fun KfStatusBanners(c: AppController) {
 @Composable
 fun KfOperationFeedback(c: AppController, snackbar: SnackbarHostState, hasContent: Boolean) {
     val haptic = LocalHapticFeedback.current
-    LaunchedEffect(c.error) { if (hasContent) c.error?.let { snackbar.showSnackbar(it) } }
-    LaunchedEffect(c.toast) {
+    // Key on the revision, not the text: repeating the same failure must show
+    // the snackbar again, and the message is consumed once it has been shown
+    // so it cannot be re-read as a later destination's load error.
+    LaunchedEffect(c.errorRevision) {
+        val revision = c.errorRevision
+        if (hasContent) c.error?.let {
+            snackbar.showSnackbar(it)
+            c.consumeError(revision)
+        }
+    }
+    LaunchedEffect(c.toastRevision) {
+        val revision = c.toastRevision
         c.toast?.let { message ->
             if (message in setOf("已收藏", "已取消收藏", "提交成功", "已提交")) haptic.performHapticFeedback(HapticFeedbackType.Confirm)
             snackbar.showSnackbar(message)
-            c.clearMessage()
+            c.consumeToast(revision)
         }
     }
 }
@@ -248,9 +258,15 @@ fun KfPageActions(c: AppController, kind: KfDestinationKind, page: PageData?, ac
         IconButton(onClick = { c.showTopicFilters = true }) { Icon(Icons.Default.FilterList, "筛选主题") }
     }
     if (kind == KfDestinationKind.READER) page?.favorite?.let { favorite ->
+        // The site supplies favor when unfavorited and unfavor when favorited,
+        // so a missing toolbar button would otherwise mean "already saved".
+        val favorited = favorite.url.contains("action=unfavor")
         IconButton(onClick = { c.favoriteThread(favorite) }, enabled = !c.siteBusy) {
             if (c.siteBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            else Icon(Icons.Default.BookmarkAdd, favorite.title.ifBlank { "收藏" })
+            else Icon(
+                if (favorited) Icons.Default.Bookmark else Icons.Default.BookmarkAdd,
+                if (favorited) "已收藏，点按取消" else "收藏本帖",
+            )
         }
     }
     if (kind == KfDestinationKind.PROFILE) {
