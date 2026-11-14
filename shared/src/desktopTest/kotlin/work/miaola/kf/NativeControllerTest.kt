@@ -47,6 +47,20 @@ class NativeControllerTest {
         c.requestBack(); assertNull(c.gallery); assertEquals(current, c.page); assertTrue(c.canBack)
         c.close()
     }
+    @Test fun galleryNoticeIsScopedToTheCurrentGallery() = runTest {
+        val c = AppController(MemoryStore(), DemoFactory(), backgroundScope, browser = { _, _ -> })
+        runCurrent()
+        val url = "https://kf.miaola.work/a.jpg"
+        c.showImages(url, listOf(url))
+        c.reportPlatformResult("保存失败", failed = true)
+        assertEquals("保存失败", c.galleryNotice)
+        c.closeImages()
+        assertNull(c.gallery); assertNull(c.galleryNotice)
+        c.showImages(url, listOf(url))
+        assertNull(c.galleryNotice)
+        c.close()
+    }
+
     @Test fun domainSwitchClearsImageAndUploadState() = runTest {
         val c = AppController(MemoryStore(), DemoFactory(), backgroundScope, browser = { _, _ -> })
         runCurrent(); c.showImages("https://kf.miaola.work/a.jpg", listOf("https://kf.miaola.work/a.jpg"))

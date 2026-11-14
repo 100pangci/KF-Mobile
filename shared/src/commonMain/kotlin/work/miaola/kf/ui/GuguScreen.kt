@@ -17,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -337,13 +338,16 @@ private fun GuguWinRateLine(label: String, values: List<String>, columns: Int) {
     }
 }
 
+@Composable
 private fun guguRateColor(value: String): Color {
     val percent = value.removeSuffix("%").trim().toFloatOrNull() ?: return Color.Unspecified
+    // Fixed dark-mode-safe choices: light tints on dark, deep tints on light.
+    val dark = MaterialTheme.colorScheme.surface.luminance() < 0.5f
     return when {
-        percent > 90 -> Color(0xFF2E7D32)
-        percent > 70 -> Color(0xFF66BB6A)
-        percent < 30 -> Color(0xFFE57373)
-        else -> Color.Unspecified
+        percent > 90 -> if (dark) Color(0xFF7BD389) else Color(0xFF1B5E20)
+        percent > 70 -> if (dark) Color(0xFFA5D6A7) else Color(0xFF2E7D32)
+        percent < 30 -> if (dark) Color(0xFFEF9A9A) else Color(0xFFC62828)
+        else -> if (dark) Color(0xFFE0C9CF) else Color(0xFF5F4449)
     }
 }
 

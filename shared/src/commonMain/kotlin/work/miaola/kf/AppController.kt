@@ -24,6 +24,12 @@ class AppController(
     internal val domains = DomainRepository(store, factory)
     var catalog by mutableStateOf(domains.local()); internal set
     var configUrl by mutableStateOf(store.get("config_url") ?: defaultConfigUrl); internal set
+    /** Config refresh has no page to show progress in; surface it as feedback. */
+    var catalogBusy by mutableStateOf(false); internal set
+    internal var catalogRefreshVersion = 0L
+    /** Number of active batch-management screens; their pinned bar owns the bottom area. */
+    var managementScreenCount by mutableStateOf(0); internal set
+    val managementActive: Boolean get() = managementScreenCount > 0
     var origin by mutableStateOf(runCatching { normalizeOrigin(store.get("selected_origin") ?: catalog.catalog.domains.first { it.id == catalog.catalog.defaultDomainId }.origin) }.getOrDefault("https://kf.miaola.work")); internal set
     var theme by mutableStateOf(runCatching { ThemeMode.valueOf(store.get("theme") ?: "SYSTEM") }.getOrDefault(ThemeMode.SYSTEM)); internal set
     var page by mutableStateOf<PageData?>(null); internal set
@@ -31,8 +37,29 @@ class AppController(
     var tab by mutableStateOf(HomeTab.FEED); internal set
     var busy by mutableStateOf(false); internal set
     var loadingEditor by mutableStateOf(false); internal set
-    var error by mutableStateOf<String?>(null); internal set
-    var toast by mutableStateOf<String?>(null); internal set
+    private var errorState by mutableStateOf<String?>(null)
+    /**
+     * Operation feedback. Displayed once by the snackbar host, which then
+     * consumes it; page-load failures are mirrored into [pageError] so an
+     * unrelated message can never become a page's "load failed" reason.
+     */
+    var error: String?
+        get() = errorState
+        internal set(value) {
+            if (value != null) errorRevision++
+            errorState = value
+        }
+    internal var errorRevision by mutableStateOf(0L); private set
+    /** Last page-load failure only. Cleared when the next request starts. */
+    var pageError by mutableStateOf<String?>(null); internal set
+    private var toastState by mutableStateOf<String?>(null)
+    var toast: String?
+        get() = toastState
+        internal set(value) {
+            if (value != null) toastRevision++
+            toastState = value
+        }
+    internal var toastRevision by mutableStateOf(0L); private set
     var showSettings by mutableStateOf(false)
     var showLogin by mutableStateOf(false)
     var editor by mutableStateOf<EditorForm?>(null); internal set
@@ -85,6 +112,8 @@ class AppController(
     var editorFiles by mutableStateOf<List<LocalUpload>>(emptyList()); internal set
     var formFiles by mutableStateOf<Map<String, List<LocalUpload>>>(emptyMap()); internal set
     var gallery by mutableStateOf<ImageGallery?>(null); internal set
+    /** Gallery-local note. A snackbar error must not leak into the photo viewer. */
+    var galleryNotice by mutableStateOf<String?>(null); internal set
     var accountAvatar by mutableStateOf<String?>(null); internal set
     var accountProfile by mutableStateOf<NativeProfile?>(null); internal set
     var fontScale by mutableStateOf(store.get("font_scale")?.toFloatOrNull()?.coerceIn(0.85f, 1.4f) ?: 1f); internal set
@@ -156,7 +185,7 @@ class AppController(
      */
     internal val backLayers: List<BackLayer>
         get() = listOf(
-            BackLayer({ gallery != null }) { gallery = null },
+            BackLayer({ gallery != null }) { closeImages() },
             BackLayer({ pendingMessageConfirm }) { dismissMessageConfirm() },
             BackLayer({ pendingBatch != null }) { dismissBatch() },
             BackLayer({ pendingReward != null }) { dismissReward() },
@@ -189,16 +218,22 @@ class AppController(
         refreshCatalog(); load("index.php", push = false)
     }
 
-    internal fun work(editorRequest: Boolean = false, task: suspend (() -> Boolean) -> Unit) {
+    /** [loadsPage] writes [pageError] as well, for the destination's retry UI. */
+    internal fun work(editorRequest: Boolean = false, loadsPage: Boolean = false, task: suspend (() -> Boolean) -> Unit) {
         val version = ++requestVersion
         val expectedOrigin = origin
         loadingEditor = editorRequest
         requestJob?.cancel()
         requestJob = scope.launch {
-            busy = true; error = null
+            busy = true; error = null; if (loadsPage) pageError = null
             try { task { version == requestVersion && expectedOrigin == origin && isActive } }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (version == requestVersion) error = friendlyError(e) }
+            catch (e: Exception) {
+                if (version == requestVersion) {
+                    error = friendlyError(e)
+                    if (loadsPage) pageError = error
+                }
+            }
             finally { if (version == requestVersion) { busy = false; loadingEditor = false; loadingUrl = null } }
         }
     }
@@ -317,14 +352,22 @@ class AppController(
 
     fun guguActionValue(name: String): String = guguActionValues[name].orEmpty()
 
-    fun closeImages() { gallery = null }
+    fun closeImages() { gallery = null; galleryNotice = null }
     fun saveImage(url: String) { error = null; downloadRequest = NativeDownloadRequest(url, url.substringBefore('?').substringAfterLast('/').ifBlank { "image.jpg" }, true) }
     fun consumeDownloadRequest() { downloadRequest = null }
-    fun reportPlatformResult(message: String, failed: Boolean = false) { if (failed) error = message else toast = message }
+    fun reportPlatformResult(message: String, failed: Boolean = false) {
+        if (failed) {
+            error = message
+            if (gallery != null) galleryNotice = message
+        } else toast = message
+    }
     fun consumeNativePage() { pendingNativePage = null }
     fun clearMessage() { toast = null }
     fun dismissSessionNotice() { sessionNotice = null }
     fun clearError() { error = null }
+    /** Called by the snackbar host once the message has actually been shown. */
+    internal fun consumeError(revision: Long) { if (revision == errorRevision) errorState = null }
+    internal fun consumeToast(revision: Long) { if (revision == toastRevision) toastState = null }
 
     // URL/title lists are stored in the encrypted platform store, scoped by origin.
     internal fun readLinks(key: String): List<SiteLink> = store.get("$key@$origin")?.lineSequence()?.mapNotNull {

@@ -77,7 +77,7 @@ fun AppController.openEditor(url: String) {
         if (busy || writeBusy) return
         if (resolve(url).effect != SiteEffect.READ) { toast = "请从发帖或回复入口打开编辑器"; return }
         if (!authenticated) { loginReturnUrl = page?.url?.let(::loginDestination); showLogin = true; return }
-        work(editorRequest = true) {
+        work(editorRequest = true, loadsPage = true) {
             val form = service.editor(url)
             if (!it()) return@work
             editor = form

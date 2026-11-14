@@ -234,12 +234,24 @@ class ForumHtmlParser(private val origin: String) {
         val logout = doc.select("#kf_information a[href]").firstOrNull { a ->
             resolve(a.attr("href"), url)?.toHttpUrl()?.let { it.pathSegments.lastOrNull() == "login.php" && it.queryParameter("action") == "quit" } == true
         }?.let { SiteDestination(resolve(it.attr("href"), url)!!, SiteEffect.CHANGE, "服务端退出登录", "将向站点提交退出请求，并清除当前设备的登录界面。") }
-        val favorite = doc.select("a[href*='kf_tidfavor.php']").firstOrNull { a ->
-            val target = resolve(a.attr("href"), url) ?: return@firstOrNull false
-            target.toHttpUrl().queryParameter("action") == "favor"
-        }?.let { a ->
-            val target = resolve(a.attr("href"), url) ?: return@let null
-            routes.classify(target, "收藏本帖").let { if (it.effect == SiteEffect.CHANGE) it.copy(title = "收藏本帖", explanation = "将把本帖加入站点的收藏夹，不会保存在本机。") else null }
+        // The reader toggles between favor and unfavor. Keep both so the app can
+        // show "already favorited" and offer the site's own inverse control.
+        val favorite = listOf("favor", "unfavor").firstNotNullOfOrNull { action ->
+            doc.select("a[href*='kf_tidfavor.php']").firstOrNull { a ->
+                resolve(a.attr("href"), url)?.toHttpUrl()?.queryParameter("action") == action
+            }?.let { a ->
+                resolve(a.attr("href"), url)?.let { target ->
+                    val favorited = action == "unfavor"
+                    routes.classify(target, if (favorited) "取消收藏" else "收藏本帖").let {
+                        if (it.effect != SiteEffect.CHANGE) null
+                        else it.copy(
+                            title = if (favorited) "取消收藏" else "收藏本帖",
+                            explanation = if (favorited) "将从站点收藏夹移除本帖，不会影响本机记录。"
+                            else "将把本帖加入站点的收藏夹，不会保存在本机。",
+                        )
+                    }
+                }
+            }
         }
         val boardFilters = if (path == "thread.php") contentRoot(doc).select("a[href*='thread.php?']").mapNotNull { a ->
             val target = resolve(a.attr("href"), url)?.toHttpUrl() ?: return@mapNotNull null

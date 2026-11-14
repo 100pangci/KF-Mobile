@@ -62,7 +62,7 @@ typealias ForumImage = @Composable (url: String, label: String, modifier: Modifi
 
 @Composable
 fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
-    if (page == null) { KfPageLoadState(c.busy, c.error, { c.ensurePage("index.php", true) }); return }
+    if (page == null) { KfPageLoadState(c.busy, c.pageError, { c.ensurePage("index.php", true) }); return }
     val sections = page.feeds
     val ordered = remember(sections) { sections.sortedBy { section ->
         when (section.id) {
@@ -98,34 +98,39 @@ fun FeedScreen(c: AppController, actions: KfActions, page: PageData? = c.page) {
     val timeline = ListInteractions(c, state, page, HomeTab.FEED)
     val topics = if (ordered.isEmpty()) timeline?.topics ?: page.topics else timeline?.feedTopics?.get(active?.id) ?: active?.topics.orEmpty()
     RefreshableList(timeline, { c.refreshTimeline(page) }) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.ListBottom)) {
-        if (ordered.isNotEmpty()) item {
-            SecondaryTabRow(selectedTabIndex = ordered.indexOf(active).coerceAtLeast(0), containerColor = MaterialTheme.colorScheme.background) {
+        Column(Modifier.fillMaxSize()) {
+            // Feed partitions are primary navigation; keep them above the
+            // scrolling list just like the message mailbox tabs.
+            if (ordered.isNotEmpty()) SecondaryTabRow(
+                selectedTabIndex = ordered.indexOf(active).coerceAtLeast(0),
+                containerColor = MaterialTheme.colorScheme.background,
+            ) {
                 ordered.forEach { section ->
                     Tab(selected = section.id == active?.id, onClick = { sectionId = section.id },
                         text = { Text(when (section.id) { "recommended" -> "推荐"; "new-topics" -> "新主题"; "latest-replies" -> "最新回复"; else -> section.title }) })
                 }
             }
-        }
-        if (quickLinks.isNotEmpty()) item {
-            FlowRow(Modifier.padding(vertical = KfSpacing.Xs),
-                horizontalArrangement = Arrangement.spacedBy(KfSpacing.Sm),
-                verticalArrangement = Arrangement.spacedBy(KfSpacing.Sm)) {
-                quickLinks.forEach { link ->
-                    SuggestionChip(onClick = { actions.open(link.url) }, label = { Text(link.title, maxLines = 1) }, shape = KfPillShape)
+            LazyColumn(Modifier.weight(1f), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.ListBottom)) {
+                if (quickLinks.isNotEmpty()) item {
+                    FlowRow(Modifier.padding(vertical = KfSpacing.Xs),
+                        horizontalArrangement = Arrangement.spacedBy(KfSpacing.Sm),
+                        verticalArrangement = Arrangement.spacedBy(KfSpacing.Sm)) {
+                        quickLinks.forEach { link ->
+                            SuggestionChip(onClick = { actions.open(link.url) }, label = { Text(link.title, maxLines = 1) }, shape = KfPillShape)
+                        }
+                    }
                 }
+                if (topics.isEmpty()) item { EmptyState(false, page.notice, onRetry = { c.refreshTimeline(page) }) }
+                items(topics, key = { topicIdentity(it.url) }) { topic ->
+                    TopicCard(
+                        topic, actions.open, timeInHeader = true,
+                        hideGroup = active?.title?.let { it == topic.group } == true,
+                        modifier = Modifier.animateItem(),
+                    )
+                }
+                item("next") { NextPageFooter(c, page, timeline) }
             }
         }
-        if (topics.isEmpty()) item { EmptyState(false, page.notice, onRetry = { c.refreshTimeline(page) }) }
-        items(topics, key = { topicIdentity(it.url) }) { topic ->
-            TopicCard(
-                topic, actions.open, timeInHeader = true,
-                hideGroup = active?.title?.let { it == topic.group } == true,
-                modifier = Modifier.animateItem(),
-            )
-        }
-        item("next") { NextPageFooter(c, page, timeline) }
-    }
     }
     }
 }
@@ -161,7 +166,7 @@ private fun TopicCard(
 
 @Composable
 fun BoardsScreen(c: AppController, actions: KfActions, page: PageData? = c.home) {
-    if (page == null) { KfPageLoadState(c.busy, c.error, { c.ensurePage("index.php", true) }); return }
+    if (page == null) { KfPageLoadState(c.busy, c.pageError, { c.ensurePage("index.php", true) }); return }
     val state = rememberLazyListState()
     val timeline = ListInteractions(c, state, page, HomeTab.BOARDS, enabled = false)
     var filter by rememberSaveable { mutableStateOf("") }
@@ -201,6 +206,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
     if (page?.nativePage?.favorites != null) { FavoritesScreen(c, page, actions, rich); return }
     val state = rememberLazyListState()
     var managing by rememberSaveable(page?.url) { mutableStateOf(false) }
+    ManagementScope(c, isMessages && managing)
     val timeline = ListInteractions(c, state, page, if (isMessages) HomeTab.MESSAGES else null, enabled = !managing)
     val topics = timeline?.topics ?: page?.topics.orEmpty()
     val messages = timeline?.messages ?: page?.nativePage?.messages.orEmpty()
@@ -226,8 +232,11 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
         }
     }
     RefreshableList(timeline, { page?.let { c.refreshTimeline(it, search) } }, enabled = !managing) {
-    LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, KfSpacing.FabBottom)) {
-        if (isMessages) item { MessageTabs(page?.url.orEmpty(), managing, actions) { managing = it } }
+    Column(Modifier.fillMaxSize()) {
+        // The partition switcher is the screen's primary navigation; keeping it
+        // outside the scrolling list means it stays reachable deep in a feed.
+        if (isMessages) MessageTabs(page?.url.orEmpty(), managing, actions) { managing = it }
+        LazyColumn(Modifier.weight(1f), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Xs, KfSpacing.ScreenGutter, if (isMessages && managing && bulkForm != null) KfSpacing.BulkBar else KfSpacing.FabBottom)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -238,22 +247,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                         Modifier.padding(top = if (heading != null) 4.dp else 0.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (isMessages && !managing) {
-                    val export = page?.nativePage?.messageExport?.takeIf { !it.requiresSelection }
-                    val exportForm = export?.let { option -> page?.nativePage?.forms?.firstOrNull { it.id == option.formId } }
-                    if (exportForm != null) TextButton(onClick = { c.exportMessages(exportForm, emptySet()) }, enabled = !c.messageExportBusy) {
-                        Icon(Icons.Default.Download, null, Modifier.size(18.dp))
-                        Text(if (c.messageExportBusy) " 导出中…" else " 导出")
-                    }
-                    page?.nativePage?.messageClear?.let { clear -> TextButton(onClick = { c.openSiteDestination(clear) }, enabled = !c.siteBusy) {
-                        Icon(Icons.Default.DeleteSweep, null, Modifier.size(18.dp))
-                        Text(" 清空")
-                    } }
-                    TextButton(onClick = { actions.open("message.php?action=banned") }) {
-                        Icon(Icons.Default.Block, null, Modifier.size(18.dp))
-                        Text(" 屏蔽列表")
-                    }
-                }
+                if (isMessages) MessagePageMenu(c, page, actions, managing, onManaging = { managing = it })
             }
         }
         if (isMessages && page != null) item { ManagementRecovery(c, page.url) }
@@ -273,9 +267,11 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                             TextButton(onClick = { selection.clear(bulkForm) }, enabled = !c.siteBusy) { Text("清空本页") }
                         }
                     }
-                    val exportOption = page?.nativePage?.messageExport
-                    val exportForm = exportOption?.let { option -> page?.nativePage?.forms?.firstOrNull { it.id == option.formId } }
-                    if (exportForm != null && exportOption?.requiresSelection == true) item {
+                    val exportForm = page?.nativePage?.let { native ->
+                        native.messageExport?.takeIf { it.requiresSelection }
+                            ?.let { option -> native.forms.firstOrNull { it.id == option.formId } }
+                    }
+                    if (exportForm != null) item {
                         OutlinedButton(
                             onClick = { c.exportMessages(exportForm, selected) },
                             enabled = selected.isNotEmpty() && !c.messageExportBusy && !c.siteBusy,
@@ -294,22 +290,7 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
                             Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(checked, { value -> selection.choose(bulkForm, if (value) selected + field.id else selected - field.id) }, enabled = !c.siteBusy)
                                 Text(field.label, Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                Text(field.options.firstOrNull()?.value.orEmpty(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
                             }
-                        }
-                    }
-                    item {
-                        Button(onClick = {
-                            val requests = batchRequests()
-                            if (requests.isEmpty() || requests.size != selection.pageCount) {
-                                c.reportPlatformResult("所选来源页已变化或无法安全复核，未提交", true)
-                            } else c.requestBatchSiteSubmit(requests)
-                        }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.fillMaxWidth().height(48.dp)) {
-                            Text(when {
-                                c.batchBusy -> "正在提交…"
-                                selection.pageCount > 1 -> "跨页删除所选（${selection.pageCount} 页 · ${selection.count} 项）"
-                                else -> "删除本页所选（${selected.size}）"
-                            })
                         }
                     }
                 }
@@ -328,6 +309,66 @@ fun ListingScreen(c: AppController, actions: KfActions, page: PageData?, isMessa
         if (!managing && page != null) item("next") { NextPageFooter(c, page, timeline) }
         if (isMessages && page?.nativePage != null && rich != null) item { TaskPageExtras(c, page.nativePage, actions, rich) }
     }
+        // Batch submit used to sit after every row; keep it reachable instead.
+        if (isMessages && managing && bulkForm != null) {
+            Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .padding(horizontal = KfSpacing.ScreenGutter, vertical = KfSpacing.Sm),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("已选 ${selected.size} / ${bulkFields.size}", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = {
+                    val requests = batchRequests()
+                    if (requests.isEmpty() || requests.size != selection.pageCount) {
+                        c.reportPlatformResult("所选来源页已变化或无法安全复核，未提交", true)
+                    } else c.requestBatchSiteSubmit(requests)
+                }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }) {
+                    Text(when {
+                        c.batchBusy -> "正在提交…"
+                        selection.pageCount > 1 -> "跨页删除（${selection.count} 项）"
+                        else -> "删除所选（${selected.size}）"
+                    })
+                }
+            }
+        }
+    }
+    }
+}
+
+/** Message-level actions: too many for the header row at phone width. */
+@Composable
+private fun MessagePageMenu(c: AppController, page: PageData?, actions: KfActions, managing: Boolean, onManaging: (Boolean) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val exportForm = page?.nativePage?.let { native ->
+        native.messageExport?.takeIf { !it.requiresSelection }
+            ?.let { option -> native.forms.firstOrNull { it.id == option.formId } }
+    }
+    val clear = page?.nativePage?.messageClear
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, "消息操作") }
+        DropdownMenu(open, { open = false }) {
+            if (exportForm != null) DropdownMenuItem(
+                text = { Text(if (c.messageExportBusy) "正在导出…" else "导出全部") },
+                leadingIcon = { Icon(Icons.Default.Download, null) },
+                enabled = !c.messageExportBusy,
+                onClick = { open = false; c.exportMessages(exportForm, emptySet()) },
+            )
+            if (clear != null) DropdownMenuItem(
+                text = { Text("清空消息") },
+                leadingIcon = { Icon(Icons.Default.DeleteSweep, null) },
+                enabled = !c.siteBusy,
+                onClick = { open = false; c.openSiteDestination(clear) },
+            )
+            DropdownMenuItem(
+                text = { Text("屏蔽列表") },
+                leadingIcon = { Icon(Icons.Default.Block, null) },
+                onClick = { open = false; actions.open("message.php?action=banned") },
+            )
+            DropdownMenuItem(
+                text = { Text(if (managing) "退出管理" else "批量管理") },
+                leadingIcon = { Icon(Icons.Default.Checklist, null) },
+                onClick = { open = false; onManaging(!managing) },
+            )
+        }
     }
 }
 
@@ -614,7 +655,7 @@ fun LoginScreen(c: AppController, actions: KfActions) {
 }
 
 @Composable
-fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage, onLogout: () -> Unit) {
+fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage, onLogout: () -> Unit, appVersion: String? = null) {
     var section by rememberSaveable { mutableStateOf("入口") }
     var showSkins by rememberSaveable { mutableStateOf(false) }
     val savedSections = rememberSaveableStateHolder()
@@ -623,8 +664,8 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
     val timeline = ListInteractions(c, state, if (section == "书签") c.siteFavorites else null, HomeTab.ACCOUNT)
     val profile = c.accountProfile
     val initial = c.home?.username?.take(1).orEmpty().ifBlank { "月" }
-    val sessionPending = c.home == null && (c.busy || (c.error == null && c.page == null))
-    val sessionUnavailable = c.home == null && !c.busy && (c.error != null || c.page != null)
+    val sessionPending = c.home == null && (c.busy || (c.pageError == null && c.page == null))
+    val sessionUnavailable = c.home == null && !c.busy && (c.pageError != null || c.page != null)
     val stats = profile?.stats.orEmpty()
     val menuLinks = c.home?.menu.orEmpty()
         .filterNot {
@@ -672,7 +713,7 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                             Text(
                                 when {
                                     sessionPending -> "正在验证会话…"
-                                    sessionUnavailable -> c.error ?: "请检查网络后重试"
+                                    sessionUnavailable -> c.pageError ?: "请检查网络后重试"
                                     c.authenticated -> "会话已验证"
                                     else -> "登录后访问更多内容"
                                 },
@@ -749,7 +790,7 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                 when {
                     sessionPending -> item { KfSkeletonScreen(rows = 2) }
                     sessionUnavailable -> item {
-                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.error.orEmpty(), actionLabel = "重试",
+                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.pageError.orEmpty(), actionLabel = "重试",
                             onAction = { c.ensurePage("index.php", force = true) })
                     }
                     !c.authenticated -> item {
@@ -789,7 +830,7 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                 when {
                     sessionPending -> item { KfSkeletonScreen(rows = 2) }
                     sessionUnavailable -> item {
-                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.error.orEmpty(), actionLabel = "重试",
+                        KfEmptyState(Icons.Default.CloudOff, "账号状态未读取", c.pageError.orEmpty(), actionLabel = "重试",
                             onAction = { c.ensurePage("index.php", force = true) })
                     }
                     !c.authenticated -> item { Button(onClick = actions.openLogin, Modifier.fillMaxWidth(), shape = KfFieldShape) { Text("登录账号") } }
@@ -816,7 +857,8 @@ fun AccountScreen(c: AppController, actions: KfActions, forumAvatar: ForumImage,
                 c.home?.serverLogout?.takeIf { c.authenticated }?.let { destination -> item {
                     ListItem(headlineContent = { Text("服务端退出登录") }, leadingContent = { Icon(Icons.AutoMirrored.Filled.ExitToApp, null, tint = MaterialTheme.colorScheme.primary) }, modifier = Modifier.clickable { c.openSiteDestination(destination) })
                 } }
-                item { Text("KF Mobile 0.3.1\n非官方客户端", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                item { Text(listOfNotNull(appVersion?.let { "KF Mobile $it" }, "非官方客户端").joinToString("\n"),
+                    Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
     }
@@ -910,7 +952,12 @@ fun SettingsScreen(c: AppController) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     ListItem(headlineContent = { Text("配置来源：${c.catalog.source.label}") }, supportingContent = { Text(c.catalog.warning ?: "在线配置不可用时，自动使用最近缓存或内置列表。") })
                     OutlinedTextField(remote, { remote = it }, Modifier.fillMaxWidth(), label = { Text("GitHub Raw JSON 配置 URL") }, supportingText = { Text("留空使用内置列表") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), shape = KfFieldShape)
-                    FilledTonalButton(onClick = { c.refreshCatalog(remote) }) { Text("更新在线配置") }
+                    FilledTonalButton(onClick = { c.refreshCatalog(remote) }, enabled = !c.catalogBusy) {
+                        if (c.catalogBusy) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text(" 正在更新…")
+                        } else Text("更新在线配置")
+                    }
                     OutlinedTextField(custom, { custom = it; invalid = null }, Modifier.fillMaxWidth(), label = { Text("自定义 HTTPS 域名") }, placeholder = { Text("https://example.com") }, isError = invalid != null, supportingText = { Text(invalid ?: "只使用你信任的域名") }, singleLine = true, shape = KfFieldShape)
                     OutlinedButton(onClick = { try { pending = normalizeOrigin(custom) } catch (e: Exception) { invalid = e.message } }, shape = KfFieldShape) { Text("使用自定义服务器") }
                     Text("备用节点未逐一验证。切换服务器后，登录凭据只发送到选中的域名。", Modifier.padding(vertical = KfSpacing.Xs), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

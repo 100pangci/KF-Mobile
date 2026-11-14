@@ -170,6 +170,17 @@ class NativeSiteTest {
         assertTrue(page.favorite?.url.orEmpty().contains("kf_tidfavor.php"))
     }
 
+    @Test fun readerExposesInverseFavoriteAction() {
+        val html = """<div class="readtext" id="pidtpc"><table><tr><td width="190"><div class="readidms"><a href="profile.php?action=show&amp;uid=1">作者</a></div></td>
+            <td width="990"><div><p>正文</p></div></td></tr></table></div>
+            <a href="kf_tidfavor.php?action=unfavor&amp;tid=1&amp;sf=abc">取消收藏</a>"""
+        val page = parser.parse(html, "$origin/read.php?tid=1")
+        assertEquals("取消收藏", page.favorite?.title)
+        assertEquals(SiteEffect.CHANGE, page.favorite?.effect)
+        assertTrue(page.favorite?.url.orEmpty().contains("action=unfavor"))
+        assertTrue(page.favorite?.explanation.orEmpty().contains("移除"))
+    }
+
     @Test fun profileIsNativeStructuredData() {
         val html = """<div class="dcol" style="width:900px"><table class="log1"><tr><td>示例会员 详细信息</td></tr><tr><td><img class="pic" src="avatars/demo.png"></td><td>用户名称：示例会员<br>会员等级：初回限定版<br>论坛货币：100 KFB</td></tr>
             <tr><td>[<a href="search.php?authorid=1">用户主题</a>] [<a href="search.php?authorid=1&amp;sch_area=2">用户回复</a>]</td></tr></table></div>"""

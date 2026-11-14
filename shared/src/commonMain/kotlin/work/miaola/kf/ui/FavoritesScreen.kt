@@ -2,6 +2,7 @@
 
 package work.miaola.kf.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -31,6 +32,7 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
     val job = form?.fields?.firstOrNull { it.name == "job" && it.kind == SiteFieldKind.RADIO }
     val directory = form?.fields?.firstOrNull { it.name == "type" && it.kind == SiteFieldKind.SELECT }
     var managing by rememberSaveable { mutableStateOf(false) }
+    ManagementScope(c, managing)
     val selection = remember(page.url) { SourcePageSelection() }
     LaunchedEffect(c.managementRevision) { selection.clear() }
     val selected = form?.let(selection::fieldIds).orEmpty()
@@ -61,63 +63,78 @@ fun FavoritesScreen(c: AppController, page: PageData, actions: KfActions, rich: 
         } else c.requestBatchSiteSubmit(requests)
     }
     RefreshableList(timeline, { c.refreshTimeline(page) }, enabled = !managing) {
-        LazyColumn(Modifier.fillMaxSize(), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, KfSpacing.FabBottom)) {
-            item { ManagementRecovery(c, page.url) }
-            item { Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { categories = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.FolderOpen, null); Text(" 收藏分类"); Icon(Icons.Default.ExpandMore, null) }
-                TextButton(onClick = { managing = !managing }, enabled = form != null && !c.siteBusy) { Text(if (managing) "完成" else "管理") }
-            } }
-            if (managing) item { SourcePagePicker(sources, form, selection.count, !c.siteBusy) { activeSource = it } }
-            if (managing) item { Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("已选 ${selected.size}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                TextButton(onClick = { form?.let { selection.choose(it, activeFavorites.entries.mapNotNull { entry -> entry.selectionFieldId }.toSet()) } }, enabled = !c.siteBusy) { Text("全选本页") }
-                TextButton(onClick = { form?.let(selection::clear) }, enabled = !c.siteBusy) { Text("清空本页") }
-            } }
-            if (managing) {
-                items(activeFavorites.entries, key = { topicIdentity(it.topic.url) }) { entry ->
-                    val id = entry.selectionFieldId
-                    Row(Modifier.fillMaxWidth().animateItem().clickable(enabled = id != null && !c.siteBusy) {
-                        if (id != null && form != null) selection.choose(form, if (id in selected) selected - id else selected + id)
-                    }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(id in selected, null, enabled = id != null && !c.siteBusy)
-                        FavoriteText(entry.topic, Modifier.weight(1f))
-                    }
-                    HorizontalDivider()
-                }
-                item { Row(Modifier.padding(vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (job?.options?.any { it.value == "change" } == true && directory != null)
-                        OutlinedButton(onClick = { move = true }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) { Text("移动分类") }
-                    if (job?.options?.any { it.value == "clear" } == true)
-                        Button(onClick = { submit("clear") }, enabled = selection.count > 0 && !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) { Text("删除") }
+        Column(Modifier.fillMaxSize()) {
+            LazyColumn(Modifier.weight(1f), state = state, contentPadding = PaddingValues(KfSpacing.ScreenGutter, KfSpacing.Sm, KfSpacing.ScreenGutter, if (managing && selection.count > 0) KfSpacing.BulkBar else if (managing) KfSpacing.Sm else KfSpacing.FabBottom)) {
+                item { ManagementRecovery(c, page.url) }
+                item { Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { categories = true }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.FolderOpen, null); Text(" 收藏分类"); Icon(Icons.Default.ExpandMore, null) }
+                    TextButton(onClick = { managing = !managing }, enabled = form != null && !c.siteBusy) { Text(if (managing) "完成" else "管理") }
                 } }
-                if (selection.pageCount > 1) item {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (managing) item { SourcePagePicker(sources, form, selection.count, !c.siteBusy) { activeSource = it } }
+                if (managing) item { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("共 ${activeFavorites.entries.size} 项", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                    TextButton(onClick = { form?.let { selection.choose(it, activeFavorites.entries.mapNotNull { entry -> entry.selectionFieldId }.toSet()) } }, enabled = !c.siteBusy) { Text("全选本页") }
+                    TextButton(onClick = { form?.let(selection::clear) }, enabled = !c.siteBusy) { Text("清空本页") }
+                } }
+                if (managing) {
+                    items(activeFavorites.entries, key = { topicIdentity(it.topic.url) }) { entry ->
+                        val id = entry.selectionFieldId
+                        Row(Modifier.fillMaxWidth().animateItem().clickable(enabled = id != null && !c.siteBusy) {
+                            if (id != null && form != null) selection.choose(form, if (id in selected) selected - id else selected + id)
+                        }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(id in selected, null, enabled = id != null && !c.siteBusy)
+                            FavoriteText(entry.topic, Modifier.weight(1f))
+                        }
+                        HorizontalDivider()
+                    }
+                    if (form != null && (job == null || job.options.any { it.value !in setOf("change", "clear") })) item { NativeFormCard(c, form) }
+                } else {
+                    val topics = timeline.topics
+                    if (topics.isEmpty()) item { KfEmptyState(Icons.Default.BookmarkBorder, "还没有收藏主题", "阅读时点“收藏本帖”即可加入站点收藏夹。") }
+                    items(topics, key = { topicIdentity(it.url) }) { topic ->
+                        Column(Modifier.fillMaxWidth().animateItem().combinedClickable(onClick = { actions.open(topic.url) }, onLongClick = { managing = true })) {
+                            FavoriteText(topic, Modifier.padding(vertical = 12.dp)); HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        }
+                    }
+                    item { NextPageFooter(c, page, timeline) }
+                }
+                if (rich != null) item { TaskPageExtras(c, page.nativePage, actions, rich) }
+            }
+            // Pinned while managing: the submit action must not require scrolling
+            // past every favorite entry.
+            if (managing && form != null && selection.count > 0) {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .padding(horizontal = KfSpacing.ScreenGutter, vertical = KfSpacing.Sm)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("已选 ${selected.size} / ${activeFavorites.entries.size}",
+                            Modifier.weight(1f), style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (selection.pageCount > 1) Text("${selection.pageCount} 页", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Row(Modifier.padding(top = KfSpacing.Xs), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         if (job?.options?.any { it.value == "change" } == true && directory != null)
                             OutlinedButton(onClick = {
-                                val requests = batchRequests("change")
-                                if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少目标分类，未提交", true)
-                                else c.requestBatchSiteSubmit(requests)
-                            }, enabled = !c.siteBusy && !c.batchBusy, modifier = Modifier.weight(1f)) { Text("跨页移动（${selection.pageCount} 页）") }
+                                if (selection.pageCount > 1) {
+                                    val requests = batchRequests("change")
+                                    if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少目标分类，未提交", true)
+                                    else c.requestBatchSiteSubmit(requests)
+                                } else move = true
+                            }, enabled = !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) {
+                                Text(if (selection.pageCount > 1) "跨页移动" else "移动分类")
+                            }
                         if (job?.options?.any { it.value == "clear" } == true)
                             Button(onClick = {
-                                val requests = batchRequests("clear")
-                                if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少删除操作，未提交", true)
-                                else c.requestBatchSiteSubmit(requests)
-                            }, enabled = !c.siteBusy && !c.batchBusy, modifier = Modifier.weight(1f)) { Text("跨页删除（${selection.pageCount} 页）") }
+                                if (selection.pageCount > 1) {
+                                    val requests = batchRequests("clear")
+                                    if (requests.size != selection.pageCount) c.reportPlatformResult("有页面缺少删除操作，未提交", true)
+                                    else c.requestBatchSiteSubmit(requests)
+                                } else submit("clear")
+                            }, enabled = !c.siteBusy && !c.batchBusy && sources.none { c.managementRecoveryFor(it.sourceUrl) != null }, modifier = Modifier.weight(1f)) {
+                                Text(if (c.batchBusy) "正在提交…" else if (selection.pageCount > 1) "跨页删除" else "删除所选")
+                            }
                     }
                 }
-                if (form != null && (job == null || job.options.any { it.value !in setOf("change", "clear") })) item { NativeFormCard(c, form) }
-            } else {
-                val topics = timeline.topics
-                if (topics.isEmpty()) item { KfEmptyState(Icons.Default.BookmarkBorder, "还没有收藏主题", "阅读时点“收藏本帖”即可加入站点收藏夹。") }
-                items(topics, key = { topicIdentity(it.url) }) { topic ->
-                    Column(Modifier.fillMaxWidth().animateItem().combinedClickable(onClick = { actions.open(topic.url) }, onLongClick = { managing = true })) {
-                        FavoriteText(topic, Modifier.padding(vertical = 12.dp)); HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-                    }
-                }
-                item { NextPageFooter(c, page, timeline) }
             }
-            if (rich != null) item { TaskPageExtras(c, page.nativePage, actions, rich) }
         }
     }
     if (categories) ModalBottomSheet(onDismissRequest = { categories = false }) {

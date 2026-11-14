@@ -115,10 +115,10 @@ class MainActivity : ComponentActivity() {
             Box(Modifier.fillMaxSize().background(background)) {
                 KfRoot(
                     controller,
-                    forumImage = { url, label, modifier -> NativeForumImage(controller.origin, url, label, modifier) },
+                    forumImage = { url, label, modifier -> NativeForumImage(controller.origin, url, label, modifier, showRetry = true) },
                     forumAvatar = { url, label, modifier -> NativeForumAvatar(controller.origin, url, label, modifier) },
                 ) { html, origin, fontScale, onLink, onImage -> NativeRichText(html, origin, fontScale, onLink, onImage) }
-                controller.gallery?.let { NativeImageGallery(controller.origin, it, controller::closeImages, controller::saveImage, controller.error ?: controller.toast) }
+                controller.gallery?.let { NativeImageGallery(controller.origin, it, controller::closeImages, controller::saveImage, controller.galleryNotice) }
                 controller.pendingAvatar?.let { file ->
                     AvatarPreviewDialog(file, uploading = controller.avatarBusy,
                         onConfirm = controller::confirmAvatarUpload, onDismiss = controller::cancelAvatarUpload)

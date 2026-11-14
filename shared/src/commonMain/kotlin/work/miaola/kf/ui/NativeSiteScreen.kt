@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -45,7 +46,7 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
             if (c.busy) KfSkeletonScreen(rows = 5)
             else KfEmptyState(
                 icon = Icons.Default.CloudOff,
-                title = c.error ?: "暂时无法显示内容",
+                title = c.pageError ?: "暂时无法显示内容",
                 message = "页面没有返回可识别的结构，可以重新读取。",
                 actionLabel = "重试",
                 onAction = { page?.let { c.ensurePage(it.url, force = true) } },
@@ -61,7 +62,10 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
     val background = MaterialTheme.colorScheme.background
     val state = rememberLazyListState()
     val messageDetail = page.url.contains("message.php") && page.url.contains("action=read")
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f), background), endY = 680f))) {
+    // endY is a pixel offset: convert from dp so the fade keeps its intended
+    // physical height across densities.
+    val gradientEnd = with(LocalDensity.current) { 420.dp.toPx() }
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.22f), background), endY = gradientEnd))) {
         LazyColumn(state = state, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, 2.dp, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
             native.profile?.let { profile -> item { ProfileCard(profile, c.origin, forumAvatar) } }
             if (native.blocks.isNotEmpty()) {
@@ -94,7 +98,8 @@ fun NativeSiteScreen(c: AppController, page: PageData?, actions: KfActions, rich
 private fun GrowthScreen(c: AppController, growth: NativeGrowth, native: NativeSitePage, actions: KfActions, rich: RichContent) {
     val background = MaterialTheme.colorScheme.background
     val state = rememberLazyListState()
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f), background), endY = 720f))) {
+    val gradientEnd = with(LocalDensity.current) { 460.dp.toPx() }
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.24f), background), endY = gradientEnd))) {
         LazyColumn(state = state, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(KfSpacing.ScreenGutter, 12.dp, KfSpacing.ScreenGutter, KfSpacing.ListBottom), verticalArrangement = Arrangement.spacedBy(KfSpacing.Md)) {
             item {
                 Surface(Modifier.fillMaxWidth(), shape = KfCardShape, color = MaterialTheme.colorScheme.primaryContainer) {
@@ -337,7 +342,13 @@ private fun PaletteTable(table: NativeTable, onLink: (String) -> Unit) {
                 row.forEachIndexed { cellIndex, cell ->
                     if (cellIndex > 0) VerticalDivider(Modifier.fillMaxHeight(), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                     val bg = parseColor(cell.background) ?: MaterialTheme.colorScheme.surfaceContainerHigh
-                    val fg = if (bg.luminance() > 0.55f) Color(0xFF1A1A1A) else Color.White
+                    // Mid-tones were unreadable with either fixed foreground; fall
+                    // back to the theme's own on-colors outside the safe band.
+                    val fg = when {
+                        bg.luminance() > 0.62f -> Color(0xFF1A1A1A)
+                        bg.luminance() < 0.28f -> Color.White
+                        else -> MaterialTheme.colorScheme.onSurface
+                    }
                     Box(
                         Modifier.weight(cell.colspan.toFloat()).fillMaxHeight()
                             .background(bg)
@@ -379,14 +390,19 @@ private fun GridRow(row: List<NativeCell>, columns: Int, header: Boolean, scroll
         zebra -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.35f)
         else -> Color.Transparent
     }
+    // A fixed dp column shrinks the text area when the system font grows; scale
+    // the column with the font so cells keep their share of the table.
+    val density = LocalDensity.current
+    val fontScale = density.fontScale
+    val columnWidth = (100.dp * fontScale).coerceAtLeast(88.dp)
     Row(
-        Modifier.fillMaxWidth().then(if (scrollable) Modifier.width((columns * 100).dp) else Modifier)
+        Modifier.fillMaxWidth().then(if (scrollable) Modifier.width(columnWidth * columns) else Modifier)
             .height(IntrinsicSize.Min).background(background).padding(vertical = 9.dp),
         verticalAlignment = Alignment.Top,
     ) {
         row.forEachIndexed { index, cell ->
             if (index > 0) VerticalDivider(Modifier.fillMaxHeight(), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-            val modifier = if (scrollable) Modifier.width((100 * cell.colspan).dp) else Modifier.weight(cell.colspan.toFloat())
+            val modifier = if (scrollable) Modifier.width(columnWidth * cell.colspan) else Modifier.weight(cell.colspan.toFloat())
             Box(modifier.padding(horizontal = 9.dp)) {
                 TableText(
                     cell, onLink, Modifier.fillMaxWidth(),
@@ -425,8 +441,14 @@ private fun LinkFlow(links: List<SiteDestination>, onLink: (String) -> Unit, mod
     FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         links.forEachIndexed { index, link ->
             if (index > 0) Text("·", color = MaterialTheme.colorScheme.outline, style = MaterialTheme.typography.bodySmall)
-            Text(link.title.ifBlank { "打开" }, Modifier.clickable(onClickLabel = "打开页面", role = Role.Button) { onLink(link.url) }.padding(vertical = 2.dp),
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium)
+            // Inline text links were ~22dp tall; give each one a real touch target.
+            Text(
+                link.title.ifBlank { "打开" },
+                Modifier.clickable(onClickLabel = "打开页面", role = Role.Button) { onLink(link.url) }
+                    .defaultMinSize(minHeight = 40.dp)
+                    .padding(vertical = 10.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Medium,
+            )
         }
     }
 }
@@ -439,17 +461,19 @@ internal fun UnsupportedBlock(items: List<String>) {
                 Icon(Icons.Default.Block, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("暂不可用", Modifier.padding(start = 6.dp), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
             }
-            items.forEach { item ->
-                Row(verticalAlignment = Alignment.Top) {
-                    Box(Modifier.padding(top = 6.dp).size(4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outline))
-                    val label = when {
-                        item.contains("咕咕镇") -> "咕咕镇已接入逐项确认的单步动作；菜单、礼物、翻牌、许愿池、宝石工坊、属性分配、光环天赋、满级提升、单场骰子战争与改名只暴露页面实际提供的可信控件"
-                        item.contains("头像上传") -> "请到资料设置页使用原生上传"
-                        else -> item
-                    }
-                    Text(label, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Parser coverage notes are implementation detail; only the parts a
+            // reader can act on are shown, as one short line.
+            val actionable = items.mapNotNull {
+                when {
+                    it.contains("咕咕镇") -> "咕咕镇的部分功能需要在游戏页逐项操作。"
+                    it.contains("头像上传") -> "请到资料设置页使用原生上传。"
+                    else -> null
                 }
-            }
+            }.distinct()
+            if (actionable.isEmpty()) Text(
+                "此页面的部分内容暂不支持，可以在“页面补充信息”中查看原文。",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            ) else actionable.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
@@ -458,14 +482,19 @@ internal fun UnsupportedBlock(items: List<String>) {
 internal fun NativeFormCard(c: AppController, form: SiteForm) {
     var expanded by remember(form) { mutableStateOf(form.fields.size <= 12) }
     val selectionRevision = if (form.fields.any { it.name == "delid[]" }) c.managementRevision else 0
-    val values = remember(form, selectionRevision) { mutableStateMapOf<String, List<String>>().apply {
+    // Keyed on the form only: a management revision must clear stale selections
+    // without discarding text the user already typed into the same form.
+    val values = remember(form) { mutableStateMapOf<String, List<String>>().apply {
         form.fields.forEach { put(it.id, if (it.name == "delid[]") emptyList() else it.initial) }
     } }
+    LaunchedEffect(selectionRevision) {
+        form.fields.filter { it.name == "delid[]" }.forEach { values[it.id] = emptyList() }
+    }
     KfExpandableCard(
         title = form.title,
         expanded = expanded,
         onToggle = { expanded = !expanded },
-        subtitle = if (form.fields.isNotEmpty()) "${form.fields.size} 个字段 · 点按展开" else null,
+        subtitle = if (form.fields.isNotEmpty()) "${form.fields.size} 项内容 · 点按展开" else null,
         icon = Icons.Default.EditNote,
     ) {
         ManagementRecovery(c, form.sourceUrl)

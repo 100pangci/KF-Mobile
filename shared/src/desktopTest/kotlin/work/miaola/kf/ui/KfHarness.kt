@@ -94,7 +94,7 @@ fun KfApp(c: AppController, forumImage: ForumImage = { _, label, modifier -> Box
                 if (showBottomBar) KfBottomBar(shellKind, actions)
             },
             floatingActionButton = {
-                if (!isOverlay && c.page?.composeUrl != null && (c.page?.posts?.isNotEmpty() == true ||
+                if (!c.managementActive && !isOverlay && c.page?.composeUrl != null && (c.page?.posts?.isNotEmpty() == true ||
                     c.page?.url?.substringBefore('?')?.endsWith("thread.php") == true ||
                     c.page?.url?.let { it.substringBefore('?').endsWith("message.php") && !it.contains("action=read") && !it.contains("action=banned") && !it.contains("action=scout") } == true)) ExtendedFloatingActionButton(
                     onClick = { c.page?.composeUrl?.let(actions.open) },

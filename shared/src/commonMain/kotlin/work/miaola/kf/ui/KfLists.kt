@@ -20,6 +20,17 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import work.miaola.kf.*
 
+/** A pinned management bar replaces the floating compose action while it is active. */
+@Composable
+internal fun ManagementScope(c: AppController, active: Boolean) {
+    DisposableEffect(c, active) {
+        if (active) {
+            c.managementScreenCount++
+            onDispose { c.managementScreenCount-- }
+        } else onDispose { }
+    }
+}
+
 @Composable
 internal fun ManagementRecovery(c: AppController, url: String) {
     val source = c.managementRecoveryFor(url) ?: return
@@ -56,12 +67,37 @@ internal fun ManagementRecovery(c: AppController, url: String) {
 @Composable
 internal fun SourcePagePicker(forms: List<SiteForm>, active: SiteForm?, selectedCount: Int, enabled: Boolean, choose: (String) -> Unit) {
     Column {
-        Text("跨页已选 $selectedCount 项 · 逐页提交；提交后页码可能变化，须重新选择", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            when {
+                forms.size <= 1 -> "已选 $selectedCount 项；提交后请重新选择"
+                else -> "跨页已选 $selectedCount 项 · 逐页提交；提交后页码可能变化，须重新选择"
+            },
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (forms.size > 1) androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(forms.size) { index -> val form = forms[index]
-                FilterChip(selected = form == active, onClick = { choose(form.sourceUrl) }, enabled = enabled, label = { Text("已加载页 ${index + 1}") })
+                FilterChip(
+                    selected = form == active,
+                    onClick = { choose(form.sourceUrl) },
+                    enabled = enabled,
+                    // "已加载页 N" told the user nothing about which mailbox or
+                    // folder a page belongs to.
+                    label = { Text(sourceLabel(form.sourceUrl, index)) },
+                )
             }
         }
+    }
+}
+
+/** Short, user-facing name for the page a management form came from. */
+internal fun sourceLabel(url: String, index: Int): String {
+    val query = url.substringAfter('?', "")
+    return when {
+        query.contains("action=sendbox") -> "发件箱 ${index + 1}"
+        query.contains("action=receivebox") -> "收件箱 ${index + 1}"
+        query.contains("action=scout") -> "跟踪 ${index + 1}"
+        url.contains("profile.php") -> "收藏 ${index + 1}"
+        else -> "第 ${index + 1} 页"
     }
 }
 

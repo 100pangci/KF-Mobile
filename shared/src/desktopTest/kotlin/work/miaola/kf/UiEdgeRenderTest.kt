@@ -67,6 +67,16 @@ class UiEdgeRenderTest {
             val managementHtml = """<div class='dcol' style='width:900px'><form method='post' action='message.php'>
                 <input name='verify' type='hidden' value='synthetic'><table><tr><th>标题</th><th>选定</th></tr>
                 <tr><td><a href='read.php?tid=1'>合成待核对项目</a></td><td><input name='delid[]' type='checkbox' value='1'></td></tr></table><input type='submit' value='删除'></form></div>"""
+            // The full shell hides its compose FAB while a pinned management
+            // bar owns the bottom of the screen.
+            val managementPage = parser.parse(managementHtml, "${c.origin}/message.php?action=receivebox")
+            c.presentNativePage(managementPage)
+            c.managementScreenCount = 1
+            assertTrue(c.managementActive)
+            render("management-fab-hidden") { KfApp(c, richContent = rich) }
+            c.managementScreenCount = 0
+            assertFalse(c.managementActive)
+            c.clearNativeTransientState()
             service.siteResult = SiteActionResult.Uncertain("合成结果未知，未执行服务器操作")
             listOf(false, true).forEach { favorites ->
                 val url = if (favorites) "${c.origin}/profile.php?action=favor" else "${c.origin}/message.php?action=sendbox"
